@@ -127,7 +127,8 @@ DeployMonitor/
 | DeployFolder | 배포 작업 폴더 (working copy) | `D:\deploy` |
 | IntervalSeconds | 폴링 주기 (초) | 30 |
 | DefaultBranch | 감시할 브랜치 | master |
-| AutoStart | 시작 시 자동 감시 | false |
+
+> **참고:** 프로그램은 실행 시 자동으로 감시를 시작합니다.
 
 ## deploy.bat 작성 규칙
 
@@ -168,10 +169,17 @@ exit /b 0
 - 우클릭 메뉴: 열기 / 감시 시작·중지 / 종료
 - 배포 완료 시 풍선 알림
 
+### 자동 시작
+
+- 프로그램 실행 시 자동으로 프로젝트 스캔 및 감시 시작
+- 별도의 "감시 시작" 버튼 클릭 불필요
+
 ### 로그 분리
 
 - **감시 로그**: 프로젝트 스캔, 커밋 감지 메시지
 - **배포 로그**: git clone/pull, deploy.bat 출력, Docker 상태
+- 각 로그는 500줄 제한 (초과 시 최근 400줄만 유지)
+- 탭 전환 시 자동으로 맨 아래로 스크롤
 
 ### Docker 연동
 
