@@ -51,23 +51,27 @@ namespace DeployMonitor
         /// <summary>시스템 트레이 아이콘 초기화</summary>
         private void InitializeTrayIcon()
         {
-            _trayIcon = new TaskbarIcon
+            try
             {
-                ToolTipText = "Git Deploy Monitor",
-                Visibility = Visibility.Visible
-            };
+                _trayIcon = new TaskbarIcon
+                {
+                    ToolTipText = "Git Deploy Monitor",
+                    Visibility = Visibility.Visible
+                };
 
-            // 아이콘 설정
-            var iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Assets", "app.ico");
-            if (File.Exists(iconPath))
-            {
-                _trayIcon.Icon = new Icon(iconPath);
-            }
-            else
-            {
-                // 기본 아이콘 (앱 아이콘 사용)
-                _trayIcon.Icon = SystemIcons.Application;
-            }
+                // 아이콘 설정
+                try
+                {
+                    var iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Assets", "app.ico");
+                    if (File.Exists(iconPath))
+                        _trayIcon.Icon = new Icon(iconPath);
+                    else
+                        _trayIcon.Icon = SystemIcons.Application;
+                }
+                catch
+                {
+                    _trayIcon.Icon = SystemIcons.Application;
+                }
 
             // 더블클릭 → 창 열기
             _trayIcon.TrayMouseDoubleClick += (_, _) => ShowMainWindow();
@@ -94,6 +98,11 @@ namespace DeployMonitor
             menu.Items.Add(exitItem);
 
             _trayIcon.ContextMenu = menu;
+            }
+            catch (Exception ex)
+            {
+                LogCrash("InitializeTrayIcon", ex);
+            }
         }
 
         /// <summary>메인 창 표시</summary>
@@ -136,25 +145,29 @@ namespace DeployMonitor
         /// <summary>Git safe.directory 설정 (다른 사용자 소유 저장소 접근 허용)</summary>
         private static void ConfigureGitSafeDirectory()
         {
-            try
+            // 백그라운드에서 실행 (UI 블로킹 방지)
+            System.Threading.Tasks.Task.Run(() =>
             {
-                var psi = new System.Diagnostics.ProcessStartInfo
+                try
                 {
-                    FileName = "git",
-                    Arguments = "config --global --add safe.directory \"*\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                };
+                    var psi = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "git",
+                        Arguments = "config --global --add safe.directory \"*\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    };
 
-                using var process = System.Diagnostics.Process.Start(psi);
-                process?.WaitForExit(5000);
-            }
-            catch
-            {
-                // Git이 설치되지 않은 경우 무시
-            }
+                    using var process = System.Diagnostics.Process.Start(psi);
+                    process?.WaitForExit(5000);
+                }
+                catch
+                {
+                    // Git이 설치되지 않은 경우 무시
+                }
+            });
         }
     }
 }

@@ -149,7 +149,7 @@
         <GridSplitter Grid.Row="4" HorizontalAlignment="Stretch" Height="5" Background="Transparent"/>
 
         <!-- 로그 영역 (탭) -->
-        <TabControl Grid.Row="5" Margin="0,4,0,0">
+        <TabControl Grid.Row="5" Margin="0,4,0,0" SelectionChanged="LogTabControl_SelectionChanged">
             <TabItem Header="감시 로그">
                 <ListBox x:Name="WatchLogListBox" ItemsSource="{Binding WatchLogs}"
                          FontFamily="Consolas" FontSize="12"

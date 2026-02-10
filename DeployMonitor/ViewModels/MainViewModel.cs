@@ -7,6 +7,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Windows;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Threading;
 using DeployMonitor.Models;
@@ -31,6 +32,10 @@ namespace DeployMonitor.ViewModels
         private bool _isWatching;
         private string _watchButtonText = "● 감시 시작";
 
+        // 컬렉션 동기화용 락 객체
+        private readonly object _watchLogsLock = new();
+        private readonly object _deployLogsLock = new();
+
         public MainViewModel()
         {
             _settings = AppSettings.Load();
@@ -38,6 +43,10 @@ namespace DeployMonitor.ViewModels
             _deployFolder = _settings.DeployFolder;
             _intervalSeconds = _settings.IntervalSeconds;
             _defaultBranch = _settings.DefaultBranch;
+
+            // 컬렉션 스레드 동기화 활성화
+            BindingOperations.EnableCollectionSynchronization(WatchLogs, _watchLogsLock);
+            BindingOperations.EnableCollectionSynchronization(DeployLogs, _deployLogsLock);
 
             // 이벤트 연결
             _scanner.DebugLog += AddWatchLog;
@@ -53,12 +62,8 @@ namespace DeployMonitor.ViewModels
             BrowseDeployCommand = new RelayCommand(BrowseDeployFolder);
             ManualDeployCommand = new RelayCommand(ManualDeploy);
 
-            // 초기 스캔
-            ScanProjects();
-
-            // 자동 시작
-            if (_settings.AutoStart)
-                ToggleWatch();
+            // 프로그램 로드 후 자동으로 감시 시작 (StartWatch에 스캔 포함)
+            Application.Current?.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, ToggleWatch);
         }
 
         // --- 프로퍼티 ---
@@ -125,22 +130,29 @@ namespace DeployMonitor.ViewModels
             var wasWatching = IsWatching;
             if (wasWatching) _watcher.Stop();
 
-            Projects.Clear();
-            AddWatchLog("프로젝트 스캔 중...");
+            try
+            {
+                Projects.Clear();
+                AddWatchLog("프로젝트 스캔 중...");
 
-            // 백그라운드에서 스캔 실행 (UI 블로킹 방지)
-            var repoFolder = RepoFolder;
-            var deployFolder = DeployFolder;
-            var branch = DefaultBranch;
-            var list = await System.Threading.Tasks.Task.Run(() =>
-                _scanner.Scan(repoFolder, deployFolder, branch));
+                // 백그라운드에서 스캔 실행 (UI 블로킹 방지)
+                var repoFolder = RepoFolder;
+                var deployFolder = DeployFolder;
+                var branch = DefaultBranch;
+                var list = await System.Threading.Tasks.Task.Run(() =>
+                    _scanner.Scan(repoFolder, deployFolder, branch));
 
-            foreach (var p in list)
-                Projects.Add(p);
+                foreach (var p in list)
+                    Projects.Add(p);
 
-            AddWatchLog($"deploy.bat 있는 프로젝트 {list.Count}개 발견");
+                AddWatchLog($"deploy.bat 있는 프로젝트 {list.Count}개 발견");
 
-            if (wasWatching) StartWatchInternal();
+                if (wasWatching) StartWatchInternal();
+            }
+            catch (Exception ex)
+            {
+                AddWatchLog($"스캔 오류: {ex.Message}");
+            }
         }
 
         /// <summary>감시 시작/중지 토글</summary>
@@ -160,22 +172,29 @@ namespace DeployMonitor.ViewModels
                 return;
             }
 
-            // 감시 시작 전 프로젝트 목록 새로고침 (비동기)
-            Projects.Clear();
-            AddWatchLog("프로젝트 스캔 중...");
+            try
+            {
+                // 감시 시작 전 프로젝트 목록 새로고침 (비동기)
+                Projects.Clear();
+                AddWatchLog("프로젝트 스캔 중...");
 
-            var repoFolder = RepoFolder;
-            var deployFolder = DeployFolder;
-            var branch = DefaultBranch;
-            var list = await System.Threading.Tasks.Task.Run(() =>
-                _scanner.Scan(repoFolder, deployFolder, branch));
+                var repoFolder = RepoFolder;
+                var deployFolder = DeployFolder;
+                var branch = DefaultBranch;
+                var list = await System.Threading.Tasks.Task.Run(() =>
+                    _scanner.Scan(repoFolder, deployFolder, branch));
 
-            foreach (var p in list)
-                Projects.Add(p);
+                foreach (var p in list)
+                    Projects.Add(p);
 
-            AddWatchLog($"deploy.bat 있는 프로젝트 {list.Count}개 발견");
+                AddWatchLog($"deploy.bat 있는 프로젝트 {list.Count}개 발견");
 
-            StartWatchInternal();
+                StartWatchInternal();
+            }
+            catch (Exception ex)
+            {
+                AddWatchLog($"감시 시작 오류: {ex.Message}");
+            }
         }
 
         private void StartWatchInternal()
@@ -336,11 +355,20 @@ namespace DeployMonitor.ViewModels
             while (_watchLogBuffer.TryDequeue(out var entry))
                 items.Add(entry);
 
-            foreach (var item in items)
-                WatchLogs.Add(item);
+            lock (_watchLogsLock)
+            {
+                foreach (var item in items)
+                    WatchLogs.Add(item);
 
-            while (WatchLogs.Count > 500)
-                WatchLogs.RemoveAt(0);
+                // 500줄 초과 시 최근 400줄만 유지
+                if (WatchLogs.Count > 500)
+                {
+                    var recent = WatchLogs.TakeLast(400).ToList();
+                    WatchLogs.Clear();
+                    foreach (var item in recent)
+                        WatchLogs.Add(item);
+                }
+            }
 
             Interlocked.Exchange(ref _watchLogFlushPending, 0);
 
@@ -357,11 +385,20 @@ namespace DeployMonitor.ViewModels
             while (_deployLogBuffer.TryDequeue(out var entry))
                 items.Add(entry);
 
-            foreach (var item in items)
-                DeployLogs.Add(item);
+            lock (_deployLogsLock)
+            {
+                foreach (var item in items)
+                    DeployLogs.Add(item);
 
-            while (DeployLogs.Count > 500)
-                DeployLogs.RemoveAt(0);
+                // 500줄 초과 시 최근 400줄만 유지
+                if (DeployLogs.Count > 500)
+                {
+                    var recent = DeployLogs.TakeLast(400).ToList();
+                    DeployLogs.Clear();
+                    foreach (var item in recent)
+                        DeployLogs.Add(item);
+                }
+            }
 
             Interlocked.Exchange(ref _deployLogFlushPending, 0);
 

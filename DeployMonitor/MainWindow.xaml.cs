@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Controls;
 using DeployMonitor.ViewModels;
 
 namespace DeployMonitor
@@ -18,13 +19,21 @@ namespace DeployMonitor
             // 로그 자동 스크롤
             _viewModel.WatchLogs.CollectionChanged += (_, _) =>
             {
-                if (WatchLogListBox.Items.Count > 0)
-                    WatchLogListBox.ScrollIntoView(WatchLogListBox.Items[^1]);
+                try
+                {
+                    if (WatchLogListBox?.Items.Count > 0)
+                        WatchLogListBox.ScrollIntoView(WatchLogListBox.Items[^1]);
+                }
+                catch { }
             };
             _viewModel.DeployLogs.CollectionChanged += (_, _) =>
             {
-                if (DeployLogListBox.Items.Count > 0)
-                    DeployLogListBox.ScrollIntoView(DeployLogListBox.Items[^1]);
+                try
+                {
+                    if (DeployLogListBox?.Items.Count > 0)
+                        DeployLogListBox.ScrollIntoView(DeployLogListBox.Items[^1]);
+                }
+                catch { }
             };
 
             // 배포 완료 시 트레이 알림
@@ -75,5 +84,23 @@ namespace DeployMonitor
         /// <summary>감시 중 여부</summary>
         public bool IsWatching => _viewModel.IsWatching;
 
+        /// <summary>탭 변경 시 스크롤을 맨 아래로</summary>
+        private void LogTabControl_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (e.Source is not TabControl) return;
+
+            // 약간의 지연 후 스크롤 (UI 렌더링 완료 대기)
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, () =>
+            {
+                try
+                {
+                    if (WatchLogListBox?.Items.Count > 0)
+                        WatchLogListBox.ScrollIntoView(WatchLogListBox.Items[^1]);
+                    if (DeployLogListBox?.Items.Count > 0)
+                        DeployLogListBox.ScrollIntoView(DeployLogListBox.Items[^1]);
+                }
+                catch { }
+            });
+        }
     }
 }
