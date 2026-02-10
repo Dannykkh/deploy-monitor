@@ -233,13 +233,14 @@ namespace DeployMonitor.ViewModels
         private void OnCommitDetected(ProjectInfo project, string newHash)
         {
             var deployPath = project.DeployPath ?? "";
+            var updated = false;
             var hasDeployBat = !string.IsNullOrWhiteSpace(deployPath)
                 && RepoScanner.SyncDeployBatFromRepo(
                     project.BareRepoPath,
                     deployPath,
                     project.Branch,
                     project.Name,
-                    out var updated,
+                    out updated,
                     out _);
 
             Application.Current?.Dispatcher.BeginInvoke(() =>

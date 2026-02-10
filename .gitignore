@@ -6,3 +6,9 @@
 *.cache
 *.pdb
 *.log
+
+# Claude conversation logs (auto-generated)
+.claude/conversations/
+
+# Orchestrator state (auto-generated)
+.orchestrator/
