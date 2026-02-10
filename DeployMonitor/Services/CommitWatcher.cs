@@ -21,18 +21,30 @@ namespace DeployMonitor.Services
         // 스레드 안전한 해시 추적 (UI 바인딩 프로퍼티 대신 사용)
         private readonly ConcurrentDictionary<string, string> _knownHashes = new();
 
+        // 새 프로젝트 스캔용
+        private string _repoFolder = "";
+        private string _deployFolder = "";
+        private string _defaultBranch = "master";
+
         /// <summary>새 커밋이 감지되면 발생 (ProjectInfo, newHash)</summary>
         public event Action<ProjectInfo, string>? CommitDetected;
 
         /// <summary>로그 메시지 발생</summary>
         public event Action<string>? LogMessage;
 
+        /// <summary>새 프로젝트 발견 시 발생</summary>
+        public event Action<ProjectInfo>? NewProjectFound;
+
         /// <summary>감시 시작</summary>
-        public void Start(List<ProjectInfo> projects, int intervalSeconds)
+        public void Start(List<ProjectInfo> projects, int intervalSeconds,
+            string repoFolder = "", string deployFolder = "", string defaultBranch = "master")
         {
             if (_isRunning) return;
             _isRunning = true;
             _projects = projects;
+            _repoFolder = repoFolder;
+            _deployFolder = deployFolder;
+            _defaultBranch = defaultBranch;
             _knownHashes.Clear();
 
             // 현재 해시를 기록 (백그라운드에서 실행)
@@ -149,12 +161,72 @@ namespace DeployMonitor.Services
         {
             if (!_isRunning) return;
 
+            // 기존 프로젝트 커밋 확인
             foreach (var project in _projects)
             {
                 if (!project.HasDeployBat) continue;
                 if (project.Status == ProjectStatus.Deploying) continue;
 
                 CheckProject(project);
+            }
+
+            // 새 프로젝트 스캔
+            ScanForNewProjects();
+        }
+
+        /// <summary>새 프로젝트 스캔</summary>
+        private void ScanForNewProjects()
+        {
+            if (string.IsNullOrEmpty(_repoFolder) || !Directory.Exists(_repoFolder)) return;
+
+            try
+            {
+                var dirs = Directory.GetDirectories(_repoFolder);
+                foreach (var dir in dirs)
+                {
+                    var dirName = Path.GetFileName(dir);
+
+                    // bare repo 확인
+                    var headPath = Path.Combine(dir, "HEAD");
+                    if (!File.Exists(headPath)) continue;
+
+                    // 프로젝트명
+                    var projectName = dirName.EndsWith(".git", StringComparison.OrdinalIgnoreCase)
+                        ? dirName[..^4]
+                        : dirName;
+
+                    // 이미 감시 중인지 확인
+                    if (_projects.Exists(p => p.Name == projectName)) continue;
+
+                    // deploy.bat 존재 확인
+                    if (!RepoScanner.HasDeployBatInRepo(dir, _defaultBranch, projectName, out _)) continue;
+
+                    // 새 프로젝트 발견
+                    var deployPath = Path.Combine(_deployFolder, projectName);
+                    var commitHash = RepoScanner.ReadCommitHash(dir, _defaultBranch);
+
+                    var newProject = new ProjectInfo
+                    {
+                        Name = projectName,
+                        BareRepoPath = dir,
+                        DeployPath = deployPath,
+                        HasDeployBat = true,
+                        Branch = _defaultBranch,
+                        LastCommitHash = commitHash,
+                        Status = ProjectStatus.Idle
+                    };
+
+                    _projects.Add(newProject);
+                    _knownHashes[projectName] = commitHash;
+                    SetupWatcher(newProject);
+
+                    LogMessage?.Invoke($"[{projectName}] 새 프로젝트 발견");
+                    NewProjectFound?.Invoke(newProject);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage?.Invoke($"새 프로젝트 스캔 오류: {ex.Message}");
             }
         }
 

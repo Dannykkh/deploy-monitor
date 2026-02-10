@@ -52,6 +52,7 @@ namespace DeployMonitor.ViewModels
             _scanner.DebugLog += AddWatchLog;
             _watcher.CommitDetected += OnCommitDetected;
             _watcher.LogMessage += AddWatchLog;
+            _watcher.NewProjectFound += OnNewProjectFound;
             _runner.LogMessage += AddDeployLog;
             _runner.DeployCompleted += OnDeployCompleted;
 
@@ -205,7 +206,7 @@ namespace DeployMonitor.ViewModels
                 AddWatchLog($"감시 대상: {Projects.Count}개");
 
             var projectList = new System.Collections.Generic.List<ProjectInfo>(Projects);
-            _watcher.Start(projectList, IntervalSeconds);
+            _watcher.Start(projectList, IntervalSeconds, RepoFolder, DeployFolder, DefaultBranch);
             IsWatching = true;
         }
 
@@ -315,6 +316,19 @@ namespace DeployMonitor.ViewModels
             Application.Current?.Dispatcher.BeginInvoke(() =>
             {
                 DeployFinished?.Invoke(projectName, success);
+            });
+        }
+
+        /// <summary>새 프로젝트 발견 이벤트</summary>
+        private void OnNewProjectFound(ProjectInfo project)
+        {
+            Application.Current?.Dispatcher.BeginInvoke(() =>
+            {
+                if (Projects.All(p => p.Name != project.Name))
+                {
+                    Projects.Add(project);
+                    AddWatchLog($"[{project.Name}] 새 프로젝트 추가됨");
+                }
             });
         }
 
