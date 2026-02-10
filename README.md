@@ -91,8 +91,12 @@ CommitDetected 이벤트 수신
        ▼
 deploy.bat auto 실행
        │
-       ├── exit code 0 → 성공
-       └── exit code != 0 → 실패
+       ▼
+Docker 컨테이너 상태 확인 (docker ps)
+       │
+       ├── 모든 컨테이너 running → 성공
+       │
+       └── 실패한 컨테이너 있음 → 오류 + 로그 출력
 ```
 
 ## 프로젝트 구조
@@ -155,6 +159,29 @@ exit /b 0
 
 **위치:** 저장소 루트에 `deploy.bat` 파일 배치
 
+## 주요 기능
+
+### 시스템 트레이
+
+- 창 닫기 버튼 → 트레이로 최소화
+- 트레이 더블클릭 → 창 열기
+- 우클릭 메뉴: 열기 / 감시 시작·중지 / 종료
+- 배포 완료 시 풍선 알림
+
+### 로그 분리
+
+- **감시 로그**: 프로젝트 스캔, 커밋 감지 메시지
+- **배포 로그**: git clone/pull, deploy.bat 출력, Docker 상태
+
+### Docker 연동
+
+배포 완료 후 Docker 컨테이너 상태를 자동 확인합니다:
+
+- `docker ps --filter "name={프로젝트명}-"` 로 컨테이너 조회
+- 모든 컨테이너가 running 상태면 성공
+- unhealthy 또는 stopped 컨테이너 발견 시 오류 표시
+- 실패한 컨테이너의 최근 로그 20줄 출력
+
 ## 프로젝트 상태
 
 | 상태 | 표시 | 설명 |
@@ -171,6 +198,7 @@ exit /b 0
 - .NET 8.0 Windows Desktop Runtime
 - **Git for Windows** (PATH에 등록 필수)
 - Windows OS
+- Docker Desktop (선택, 컨테이너 상태 확인용)
 
 ## 설치
 
