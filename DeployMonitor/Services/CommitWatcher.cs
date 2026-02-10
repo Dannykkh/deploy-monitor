@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
+using System.Threading.Tasks;
 using DeployMonitor.Models;
 
 namespace DeployMonitor.Services
@@ -34,13 +35,22 @@ namespace DeployMonitor.Services
             _projects = projects;
             _knownHashes.Clear();
 
-            // 현재 해시를 기록
+            // 현재 해시를 기록 (백그라운드에서 실행)
+            Task.Run(() =>
+            {
+                foreach (var project in projects)
+                {
+                    if (!project.HasDeployBat) continue;
+                    var hash = RepoScanner.ReadCommitHash(project.BareRepoPath, project.Branch);
+                    if (!string.IsNullOrEmpty(hash))
+                        _knownHashes[project.Name] = hash;
+                }
+            });
+
+            // FileSystemWatcher 설정 (가벼운 작업이므로 UI 스레드 OK)
             foreach (var project in projects)
             {
                 if (!project.HasDeployBat) continue;
-                var hash = RepoScanner.ReadCommitHash(project.BareRepoPath, project.Branch);
-                if (!string.IsNullOrEmpty(hash))
-                    _knownHashes[project.Name] = hash;
                 SetupWatcher(project);
             }
 

@@ -40,9 +40,10 @@ namespace DeployMonitor.ViewModels
             _defaultBranch = _settings.DefaultBranch;
 
             // 이벤트 연결
+            _scanner.DebugLog += AddWatchLog;
             _watcher.CommitDetected += OnCommitDetected;
-            _watcher.LogMessage += AddLog;
-            _runner.LogMessage += AddLog;
+            _watcher.LogMessage += AddWatchLog;
+            _runner.LogMessage += AddDeployLog;
             _runner.DeployCompleted += OnDeployCompleted;
 
             // 커맨드 초기화
@@ -63,7 +64,8 @@ namespace DeployMonitor.ViewModels
         // --- 프로퍼티 ---
 
         public ObservableCollection<ProjectInfo> Projects { get; } = new();
-        public ObservableCollection<string> LogEntries { get; } = new();
+        public ObservableCollection<string> WatchLogs { get; } = new();
+        public ObservableCollection<string> DeployLogs { get; } = new();
 
         public string RepoFolder
         {
@@ -118,19 +120,27 @@ namespace DeployMonitor.ViewModels
         // --- 메서드 ---
 
         /// <summary>프로젝트 목록 새로고침</summary>
-        private void ScanProjects()
+        private async void ScanProjects()
         {
             var wasWatching = IsWatching;
             if (wasWatching) _watcher.Stop();
 
             Projects.Clear();
-            var list = _scanner.Scan(RepoFolder, DeployFolder, DefaultBranch);
+            AddWatchLog("프로젝트 스캔 중...");
+
+            // 백그라운드에서 스캔 실행 (UI 블로킹 방지)
+            var repoFolder = RepoFolder;
+            var deployFolder = DeployFolder;
+            var branch = DefaultBranch;
+            var list = await System.Threading.Tasks.Task.Run(() =>
+                _scanner.Scan(repoFolder, deployFolder, branch));
+
             foreach (var p in list)
                 Projects.Add(p);
 
-            AddLog($"deploy.bat 있는 프로젝트 {list.Count}개 발견");
+            AddWatchLog($"deploy.bat 있는 프로젝트 {list.Count}개 발견");
 
-            if (wasWatching) StartWatch();
+            if (wasWatching) StartWatchInternal();
         }
 
         /// <summary>감시 시작/중지 토글</summary>
@@ -142,21 +152,38 @@ namespace DeployMonitor.ViewModels
                 StartWatch();
         }
 
-        private void StartWatch()
+        private async void StartWatch()
         {
             if (string.IsNullOrWhiteSpace(RepoFolder) || string.IsNullOrWhiteSpace(DeployFolder))
             {
-                AddLog("저장소 폴더와 배포 폴더를 먼저 설정하세요.");
+                AddWatchLog("저장소 폴더와 배포 폴더를 먼저 설정하세요.");
                 return;
             }
 
-            // 감시 시작 전 프로젝트 목록 새로고침
-            ScanProjects();
+            // 감시 시작 전 프로젝트 목록 새로고침 (비동기)
+            Projects.Clear();
+            AddWatchLog("프로젝트 스캔 중...");
 
+            var repoFolder = RepoFolder;
+            var deployFolder = DeployFolder;
+            var branch = DefaultBranch;
+            var list = await System.Threading.Tasks.Task.Run(() =>
+                _scanner.Scan(repoFolder, deployFolder, branch));
+
+            foreach (var p in list)
+                Projects.Add(p);
+
+            AddWatchLog($"deploy.bat 있는 프로젝트 {list.Count}개 발견");
+
+            StartWatchInternal();
+        }
+
+        private void StartWatchInternal()
+        {
             if (Projects.Count == 0)
-                AddLog("deploy.bat 있는 프로젝트가 없습니다. 저장소에 deploy.bat을 추가하세요.");
+                AddWatchLog("deploy.bat 있는 프로젝트가 없습니다. 저장소에 deploy.bat을 추가하세요.");
             else
-                AddLog($"감시 대상: {Projects.Count}개");
+                AddWatchLog($"감시 대상: {Projects.Count}개");
 
             var projectList = new System.Collections.Generic.List<ProjectInfo>(Projects);
             _watcher.Start(projectList, IntervalSeconds);
@@ -206,7 +233,7 @@ namespace DeployMonitor.ViewModels
         {
             if (parameter is ProjectInfo project && project.HasDeployBat)
             {
-                AddLog($"[{project.Name}] 수동 배포 시작");
+                AddDeployLog($"[{project.Name}] 수동 배포 시작");
                 _runner.Enqueue(project);
             }
         }
@@ -232,16 +259,12 @@ namespace DeployMonitor.ViewModels
         /// <summary>새 커밋 감지 시 UI 업데이트 후 배포 큐에 추가</summary>
         private void OnCommitDetected(ProjectInfo project, string newHash)
         {
-            var deployPath = project.DeployPath ?? "";
-            var updated = false;
-            var hasDeployBat = !string.IsNullOrWhiteSpace(deployPath)
-                && RepoScanner.SyncDeployBatFromRepo(
-                    project.BareRepoPath,
-                    deployPath,
-                    project.Branch,
-                    project.Name,
-                    out updated,
-                    out _);
+            // bare repo에 deploy.bat이 있는지만 확인 (복사는 DeployRunner에서 clone/pull로 처리)
+            var hasDeployBat = RepoScanner.HasDeployBatInRepo(
+                project.BareRepoPath,
+                project.Branch,
+                project.Name,
+                out _);
 
             Application.Current?.Dispatcher.BeginInvoke(() =>
             {
@@ -250,16 +273,13 @@ namespace DeployMonitor.ViewModels
                     project.HasDeployBat = false;
                     project.Status = ProjectStatus.NotConfigured;
                     project.LastMessage = "deploy.bat 없음";
-                    AddLog($"[{project.Name}] deploy.bat 없음 (목록에서 제거)");
+                    AddWatchLog($"[{project.Name}] deploy.bat 없음 (목록에서 제거)");
 
                     var existing = Projects.FirstOrDefault(p => p.Name == project.Name);
                     if (existing != null)
                         Projects.Remove(existing);
                     return;
                 }
-
-                if (updated)
-                    AddLog($"[{project.Name}] deploy.bat 업데이트됨");
 
                 if (Projects.All(p => p.Name != project.Name))
                     Projects.Add(project);
@@ -282,58 +302,73 @@ namespace DeployMonitor.ViewModels
         /// <summary>배포 완료 알림 (UI에서 구독)</summary>
         public event Action<string, bool>? DeployFinished;
 
-        /// <summary>로그 flush 완료 후 스크롤 요청</summary>
-        public event Action? ScrollToEndRequested;
+        // 로그 버퍼 (스레드 안전) - 감시/배포 분리
+        private readonly ConcurrentQueue<string> _watchLogBuffer = new();
+        private readonly ConcurrentQueue<string> _deployLogBuffer = new();
+        private int _watchLogFlushPending;
+        private int _deployLogFlushPending;
 
-        // 로그 버퍼 (스레드 안전)
-        private readonly ConcurrentQueue<string> _logBuffer = new();
-        private int _logFlushPending;
-
-        /// <summary>로그 추가 (스레드 안전, 버퍼링 후 단일 flush)</summary>
-        public void AddLog(string message)
+        /// <summary>감시 로그 추가</summary>
+        public void AddWatchLog(string message)
         {
             var timestamp = DateTime.Now.ToString("HH:mm:ss");
-            _logBuffer.Enqueue($"[{timestamp}] {message}");
+            _watchLogBuffer.Enqueue($"[{timestamp}] {message}");
 
-            // 이미 flush 예약됐으면 건너뜀
-            if (Interlocked.CompareExchange(ref _logFlushPending, 1, 0) != 0) return;
+            if (Interlocked.CompareExchange(ref _watchLogFlushPending, 1, 0) != 0) return;
 
-            var dispatcher = Application.Current?.Dispatcher;
-            if (dispatcher == null) return;
-
-            dispatcher.BeginInvoke(DispatcherPriority.Background, FlushLogBuffer);
+            Application.Current?.Dispatcher.BeginInvoke(DispatcherPriority.Background, FlushWatchLogBuffer);
         }
 
-        /// <summary>버퍼에 쌓인 로그를 한꺼번에 UI에 추가</summary>
-        private void FlushLogBuffer()
+        /// <summary>배포 로그 추가</summary>
+        public void AddDeployLog(string message)
         {
-            // 먼저 버퍼를 로컬 리스트로 모두 드레인
+            var timestamp = DateTime.Now.ToString("HH:mm:ss");
+            _deployLogBuffer.Enqueue($"[{timestamp}] {message}");
+
+            if (Interlocked.CompareExchange(ref _deployLogFlushPending, 1, 0) != 0) return;
+
+            Application.Current?.Dispatcher.BeginInvoke(DispatcherPriority.Background, FlushDeployLogBuffer);
+        }
+
+        private void FlushWatchLogBuffer()
+        {
             var items = new List<string>();
-            while (_logBuffer.TryDequeue(out var entry))
+            while (_watchLogBuffer.TryDequeue(out var entry))
                 items.Add(entry);
 
-            // 한꺼번에 추가
             foreach (var item in items)
-                LogEntries.Add(item);
+                WatchLogs.Add(item);
 
-            // 최대 500개 유지
-            while (LogEntries.Count > 500)
-                LogEntries.RemoveAt(0);
+            while (WatchLogs.Count > 500)
+                WatchLogs.RemoveAt(0);
 
-            // 모든 추가 완료 후 스크롤 (레이아웃 충돌 방지)
-            ScrollToEndRequested?.Invoke();
+            Interlocked.Exchange(ref _watchLogFlushPending, 0);
 
-            // flush 플래그 해제
-            Interlocked.Exchange(ref _logFlushPending, 0);
-
-            // flush 중 새 항목 도착 시 재예약
-            if (!_logBuffer.IsEmpty)
+            if (!_watchLogBuffer.IsEmpty)
             {
-                if (Interlocked.CompareExchange(ref _logFlushPending, 1, 0) == 0)
-                {
-                    Application.Current?.Dispatcher.BeginInvoke(
-                        DispatcherPriority.Background, FlushLogBuffer);
-                }
+                if (Interlocked.CompareExchange(ref _watchLogFlushPending, 1, 0) == 0)
+                    Application.Current?.Dispatcher.BeginInvoke(DispatcherPriority.Background, FlushWatchLogBuffer);
+            }
+        }
+
+        private void FlushDeployLogBuffer()
+        {
+            var items = new List<string>();
+            while (_deployLogBuffer.TryDequeue(out var entry))
+                items.Add(entry);
+
+            foreach (var item in items)
+                DeployLogs.Add(item);
+
+            while (DeployLogs.Count > 500)
+                DeployLogs.RemoveAt(0);
+
+            Interlocked.Exchange(ref _deployLogFlushPending, 0);
+
+            if (!_deployLogBuffer.IsEmpty)
+            {
+                if (Interlocked.CompareExchange(ref _deployLogFlushPending, 1, 0) == 0)
+                    Application.Current?.Dispatcher.BeginInvoke(DispatcherPriority.Background, FlushDeployLogBuffer);
             }
         }
 

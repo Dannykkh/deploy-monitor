@@ -14,6 +14,9 @@ namespace DeployMonitor
         {
             base.OnStartup(e);
 
+            // Git safe.directory 설정 (다른 사용자 소유 저장소 접근 허용)
+            ConfigureGitSafeDirectory();
+
             // 글로벌 예외 핸들러 (크래시 로그)
             DispatcherUnhandledException += (_, args) =>
             {
@@ -128,6 +131,30 @@ namespace DeployMonitor
         {
             _trayIcon?.Dispose();
             base.OnExit(e);
+        }
+
+        /// <summary>Git safe.directory 설정 (다른 사용자 소유 저장소 접근 허용)</summary>
+        private static void ConfigureGitSafeDirectory()
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "git",
+                    Arguments = "config --global --add safe.directory \"*\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+
+                using var process = System.Diagnostics.Process.Start(psi);
+                process?.WaitForExit(5000);
+            }
+            catch
+            {
+                // Git이 설치되지 않은 경우 무시
+            }
         }
     }
 }

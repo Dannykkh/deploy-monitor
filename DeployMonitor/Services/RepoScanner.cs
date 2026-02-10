@@ -12,6 +12,9 @@ namespace DeployMonitor.Services
     /// </summary>
     public class RepoScanner
     {
+        /// <summary>디버그 로그 이벤트</summary>
+        public event Action<string>? DebugLog;
+
         /// <summary>
         /// 저장소 폴더에서 프로젝트 목록을 스캔한다.
         /// </summary>
@@ -20,45 +23,61 @@ namespace DeployMonitor.Services
             var projects = new List<ProjectInfo>();
 
             if (!Directory.Exists(repoFolder))
+            {
+                DebugLog?.Invoke($"[DEBUG] 저장소 폴더 없음: {repoFolder}");
                 return projects;
+            }
 
-            // depth 1에서 *.git 디렉토리 검색
-            foreach (var dir in Directory.GetDirectories(repoFolder))
+            var dirs = Directory.GetDirectories(repoFolder);
+            DebugLog?.Invoke($"[DEBUG] 저장소 폴더에서 {dirs.Length}개 하위 폴더 발견");
+
+            foreach (var dir in dirs)
             {
                 var dirName = Path.GetFileName(dir);
 
                 // bare repo 확인: HEAD 파일이 있어야 함
-                if (!File.Exists(Path.Combine(dir, "HEAD")))
+                var headPath = Path.Combine(dir, "HEAD");
+                if (!File.Exists(headPath))
+                {
+                    DebugLog?.Invoke($"[DEBUG] [{dirName}] HEAD 파일 없음 - 스킵");
                     continue;
+                }
 
                 // 프로젝트명: .git 확장자 제거
                 var projectName = dirName.EndsWith(".git", StringComparison.OrdinalIgnoreCase)
                     ? dirName[..^4]
                     : dirName;
 
+                DebugLog?.Invoke($"[DEBUG] [{projectName}] bare repo 확인됨");
+
                 // deploy 폴더 매칭
                 var deployPath = Path.Combine(deployFolder, projectName);
 
-                // 저장소에 deploy.bat가 있으면 배포 폴더에 복사 (없으면 제외)
-                var hasDeployBat = SyncDeployBatFromRepo(dir, deployPath, defaultBranch, projectName, out _, out _);
+                // 저장소에 deploy.bat가 있는지 확인만 (복사는 DeployRunner에서 clone/pull로 처리)
+                var hasDeployBat = HasDeployBatInRepo(dir, defaultBranch, projectName, out var foundPath, DebugLog);
+
+                if (!hasDeployBat)
+                {
+                    DebugLog?.Invoke($"[DEBUG] [{projectName}] deploy.bat 없음 - 스킵");
+                    continue;
+                }
+
+                DebugLog?.Invoke($"[DEBUG] [{projectName}] deploy.bat 발견: {foundPath}");
 
                 // 현재 커밋 해시 읽기
                 var commitHash = ReadCommitHash(dir, defaultBranch);
 
-                if (hasDeployBat) // deploy.bat 파일이 있는 경우에만 추가
+                projects.Add(new ProjectInfo
                 {
-                    projects.Add(new ProjectInfo
-                    {
-                        Name = projectName,
-                        BareRepoPath = dir,
-                        DeployPath = deployPath,
-                        HasDeployBat = hasDeployBat,
-                        Branch = defaultBranch,
-                        LastCommitHash = commitHash,
-                        Status = ProjectStatus.Idle, // deploy.bat이 있으면 항상 Idle
-                        LastMessage = "" // deploy.bat이 있으면 메시지 없음
-                    });
-                }
+                    Name = projectName,
+                    BareRepoPath = dir,
+                    DeployPath = deployPath,
+                    HasDeployBat = hasDeployBat,
+                    Branch = defaultBranch,
+                    LastCommitHash = commitHash,
+                    Status = ProjectStatus.Idle,
+                    LastMessage = ""
+                });
             }
 
             return projects;
@@ -110,42 +129,16 @@ namespace DeployMonitor.Services
         }
 
         /// <summary>
-        /// bare repo의 deploy.bat을 읽어 배포 폴더에 동기화한다.
+        /// bare repo에 deploy.bat이 있는지 확인만 한다 (복사 안 함).
         /// </summary>
-        public static bool SyncDeployBatFromRepo(
+        public static bool HasDeployBatInRepo(
             string bareRepoPath,
-            string deployPath,
             string branch,
             string projectName,
-            out bool updated,
-            out string sourcePath)
+            out string foundPath,
+            Action<string>? debugLog = null)
         {
-            updated = false;
-            sourcePath = "";
-
-            if (!TryReadDeployBatFromRepo(bareRepoPath, branch, projectName, out var content, out sourcePath))
-                return false;
-
-            try
-            {
-                Directory.CreateDirectory(deployPath);
-                var dest = Path.Combine(deployPath, "deploy.bat");
-
-                if (File.Exists(dest))
-                {
-                    var existing = File.ReadAllText(dest);
-                    if (existing == content)
-                        return true;
-                }
-
-                File.WriteAllText(dest, content, new UTF8Encoding(false));
-                updated = true;
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
+            return TryFindDeployBatPath(bareRepoPath, branch, projectName, out foundPath, debugLog);
         }
 
         private static bool TryReadDeployBatFromRepo(
@@ -153,13 +146,14 @@ namespace DeployMonitor.Services
             string branch,
             string projectName,
             out string content,
-            out string sourcePath)
+            out string sourcePath,
+            Action<string>? debugLog = null)
         {
             content = "";
             sourcePath = "";
             try
             {
-                if (!TryFindDeployBatPath(bareRepoPath, branch, projectName, out var repoPath))
+                if (!TryFindDeployBatPath(bareRepoPath, branch, projectName, out var repoPath, debugLog))
                     return false;
 
                 var psi = new ProcessStartInfo
@@ -176,18 +170,27 @@ namespace DeployMonitor.Services
                 process.Start();
 
                 var output = process.StandardOutput.ReadToEnd();
-                process.StandardError.ReadToEnd();
+                var error = process.StandardError.ReadToEnd();
                 process.WaitForExit(5000);
 
                 if (process.ExitCode != 0)
+                {
+                    debugLog?.Invoke($"[DEBUG] git show 실패: {error}");
                     return false;
+                }
+
+                // BOM 제거 + CRLF 정규화
+                if (output.Length > 0 && output[0] == '\uFEFF')
+                    output = output[1..];
+                output = output.Replace("\r\n", "\n").Replace("\n", "\r\n");
 
                 content = output;
                 sourcePath = repoPath;
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                debugLog?.Invoke($"[DEBUG] TryReadDeployBat 예외: {ex.Message}");
                 return false;
             }
         }
@@ -196,15 +199,19 @@ namespace DeployMonitor.Services
             string bareRepoPath,
             string branch,
             string projectName,
-            out string repoPath)
+            out string repoPath,
+            Action<string>? debugLog = null)
         {
             repoPath = "";
             try
             {
+                var args = $"--git-dir \"{bareRepoPath}\" ls-tree -r --name-only {branch}";
+                debugLog?.Invoke($"[DEBUG] 실행: git {args}");
+
                 var psi = new ProcessStartInfo
                 {
                     FileName = "git",
-                    Arguments = $"--git-dir \"{bareRepoPath}\" ls-tree -r --name-only {branch}",
+                    Arguments = args,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -215,42 +222,50 @@ namespace DeployMonitor.Services
                 process.Start();
 
                 var output = process.StandardOutput.ReadToEnd();
-                process.StandardError.ReadToEnd();
+                var error = process.StandardError.ReadToEnd();
                 process.WaitForExit(5000);
 
                 if (process.ExitCode != 0)
+                {
+                    debugLog?.Invoke($"[DEBUG] git ls-tree 실패 (exit {process.ExitCode}): {error}");
                     return false;
+                }
 
+                var fileCount = 0;
                 var matches = new List<string>();
                 using (var reader = new StringReader(output))
                 {
                     string? line;
                     while ((line = reader.ReadLine()) != null)
                     {
+                        fileCount++;
                         if (line.EndsWith("deploy.bat", StringComparison.OrdinalIgnoreCase))
                             matches.Add(line.Trim());
                     }
                 }
 
+                debugLog?.Invoke($"[DEBUG] ls-tree 결과: 총 {fileCount}개 파일, deploy.bat {matches.Count}개 매칭");
+
                 if (matches.Count == 0)
                     return false;
 
-                // 프로젝트명/deploy.bat 우선
-                var preferred = $"{projectName}/deploy.bat";
+                // 루트 deploy.bat 우선
                 foreach (var m in matches)
                 {
-                    if (string.Equals(m.Replace('\\', '/'), preferred, StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(m, "deploy.bat", StringComparison.OrdinalIgnoreCase))
                     {
                         repoPath = m;
                         return true;
                     }
                 }
 
+                // 그 외 첫 번째
                 repoPath = matches[0];
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                debugLog?.Invoke($"[DEBUG] TryFindDeployBatPath 예외: {ex.Message}");
                 return false;
             }
         }

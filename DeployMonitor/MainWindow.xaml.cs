@@ -1,4 +1,3 @@
-using System;
 using System.ComponentModel;
 using System.Windows;
 using DeployMonitor.ViewModels;
@@ -16,11 +15,16 @@ namespace DeployMonitor
             _viewModel = new MainViewModel();
             DataContext = _viewModel;
 
-            // 로그 자동 스크롤 (ViewModel에서 flush 완료 후 호출)
-            _viewModel.ScrollToEndRequested += () =>
+            // 로그 자동 스크롤
+            _viewModel.WatchLogs.CollectionChanged += (_, _) =>
             {
-                if (LogListBox.Items.Count > 0)
-                    LogListBox.ScrollIntoView(LogListBox.Items[^1]);
+                if (WatchLogListBox.Items.Count > 0)
+                    WatchLogListBox.ScrollIntoView(WatchLogListBox.Items[^1]);
+            };
+            _viewModel.DeployLogs.CollectionChanged += (_, _) =>
+            {
+                if (DeployLogListBox.Items.Count > 0)
+                    DeployLogListBox.ScrollIntoView(DeployLogListBox.Items[^1]);
             };
 
             // 배포 완료 시 트레이 알림

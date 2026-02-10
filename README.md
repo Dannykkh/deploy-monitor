@@ -1,6 +1,6 @@
 # Deploy Monitor
 
-Bonobo Git Server의 bare repository를 감시하여 새 커밋이 push되면 자동으로 `deploy.bat`을 실행하는 WPF 애플리케이션입니다.
+Bonobo Git Server의 bare repository를 감시하여 새 커밋이 push되면 자동으로 배포하는 WPF 애플리케이션입니다.
 
 ## 목적
 
@@ -24,20 +24,20 @@ Bonobo Git Server의 bare repository를 감시하여 새 커밋이 push되면 �
 │  │ (bare repo 폴더)     │ ───▶ │ (이 프로그램)        │                 │
 │  │                      │ 감시 │                      │                 │
 │  │ C:\Bonobo.Git.Server │      │ 1. 커밋 변경 감지    │                 │
-│  │ \App_Data\Repositories      │ 2. deploy.bat 복사   │                 │
+│  │ \App_Data\Repositories      │ 2. git clone/pull    │                 │
 │  │   ├── project-a.git  │      │ 3. deploy.bat 실행   │                 │
 │  │   ├── project-b.git  │      │                      │                 │
 │  │   └── project-c.git  │      └──────────┬───────────┘                 │
 │  └──────────────────────┘                 │                              │
 │                                           ▼                              │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │ Deploy 폴더 (D:\deploy)                                          │   │
-│  │   ├── project-a\                                                  │   │
+│  │ Deploy 폴더 (D:\deploy) - git working copy                       │   │
+│  │   ├── project-a\        (자동 clone/pull)                        │   │
+│  │   │     ├── .git\                                                 │   │
+│  │   │     ├── src\                                                  │   │
 │  │   │     └── deploy.bat  ──▶ 실행 (auto 인자)                     │   │
 │  │   ├── project-b\                                                  │   │
-│  │   │     └── deploy.bat  ──▶ 실행 (auto 인자)                     │   │
 │  │   └── project-c\                                                  │   │
-│  │         └── deploy.bat  ──▶ 실행 (auto 인자)                     │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -82,13 +82,11 @@ git ls-tree로 deploy.bat 존재 여부 확인
 CommitDetected 이벤트 수신
        │
        ▼
-bare repo에서 deploy.bat 읽기 (git show)
+배포 폴더에 .git 존재 확인
        │
-       ▼
-deploy 폴더에 프로젝트 디렉토리 생성
+       ├── 없음 (최초) → git clone
        │
-       ▼
-deploy.bat 복사 (내용이 다를 때만)
+       └── 있음 → git pull
        │
        ▼
 deploy.bat auto 실행
@@ -105,9 +103,9 @@ DeployMonitor/
 │   ├── AppSettings.cs      # 설정 (settings.json)
 │   └── ProjectInfo.cs      # 프로젝트 정보 모델
 ├── Services/
-│   ├── RepoScanner.cs      # bare repo 스캔 및 deploy.bat 동기화
+│   ├── RepoScanner.cs      # bare repo 스캔 (deploy.bat 존재 확인)
 │   ├── CommitWatcher.cs    # 커밋 변경 감시 (FSW + 폴링)
-│   └── DeployRunner.cs     # deploy.bat 실행 큐
+│   └── DeployRunner.cs     # git clone/pull + deploy.bat 실행
 ├── ViewModels/
 │   ├── MainViewModel.cs    # 메인 뷰모델
 │   └── RelayCommand.cs     # ICommand 구현
@@ -122,14 +120,16 @@ DeployMonitor/
 | 항목 | 설명 | 기본값 |
 |------|------|--------|
 | RepositoryFolder | Bonobo bare repo 폴더 | `C:\Bonobo.Git.Server\App_Data\Repositories` |
-| DeployFolder | 배포 작업 폴더 | `D:\deploy` |
+| DeployFolder | 배포 작업 폴더 (working copy) | `D:\deploy` |
 | IntervalSeconds | 폴링 주기 (초) | 30 |
 | DefaultBranch | 감시할 브랜치 | master |
 | AutoStart | 시작 시 자동 감시 | false |
 
 ## deploy.bat 작성 규칙
 
-프로젝트 저장소에 `deploy.bat` 파일을 커밋하면 자동으로 감지됩니다:
+프로젝트 저장소에 `deploy.bat` 파일을 커밋하면 자동으로 감지됩니다.
+
+**중요:** git clone/pull은 Deploy Monitor가 자동으로 수행하므로, deploy.bat에서는 빌드/배포 로직만 작성하세요.
 
 ```batch
 @echo off
@@ -140,15 +140,20 @@ if "%1"=="auto" (
     echo [AUTO] 자동 배포 시작
 )
 
-REM 여기에 배포 로직 작성
-REM 예: git pull, dotnet publish, 서비스 재시작 등
+REM git pull은 Deploy Monitor가 자동으로 수행하므로 불필요
+
+REM 빌드
+dotnet publish -c Release -o publish
+
+REM 서비스 재시작 등
+net stop MyService
+xcopy /E /Y publish\* C:\Services\MyService\
+net start MyService
 
 exit /b 0
 ```
 
-**위치 우선순위:**
-1. `{프로젝트명}/deploy.bat` (프로젝트 폴더 내)
-2. 루트의 `deploy.bat`
+**위치:** 저장소 루트에 `deploy.bat` 파일 배치
 
 ## 프로젝트 상태
 
@@ -156,7 +161,7 @@ exit /b 0
 |------|------|------|
 | Idle | ● 대기 | 감시 대기 중 |
 | Checking | ⟳ 확인중 | 커밋 확인 중 |
-| Deploying | ⟳ 배포중 | deploy.bat 실행 중 |
+| Deploying | ⟳ 배포중 | clone/pull + deploy.bat 실행 중 |
 | Success | ✓ 정상 | 배포 성공 |
 | Error | ✗ 오류 | 배포 실패 |
 | NotConfigured | — 미설정 | deploy.bat 없음 |
@@ -164,8 +169,15 @@ exit /b 0
 ## 요구사항
 
 - .NET 8.0 Windows Desktop Runtime
-- Git CLI (PATH에 등록)
+- **Git for Windows** (PATH에 등록 필수)
 - Windows OS
+
+## 설치
+
+1. [Git for Windows](https://git-scm.com/download/win) 설치
+   - 설치 시 "Add to PATH" 옵션 체크
+2. [.NET 8.0 Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) 설치
+3. DeployMonitor 실행 파일 배포
 
 ## 빌드
 

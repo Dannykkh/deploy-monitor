@@ -148,15 +148,24 @@
         <!-- 구분선 (리사이즈) -->
         <GridSplitter Grid.Row="4" HorizontalAlignment="Stretch" Height="5" Background="Transparent"/>
 
-        <!-- 로그 영역 -->
-        <DockPanel Grid.Row="5">
-            <TextBlock DockPanel.Dock="Top" Text="로그" FontWeight="SemiBold" Margin="0,4,0,4"/>
-            <ListBox x:Name="LogListBox" ItemsSource="{Binding LogEntries}"
-                     FontFamily="Consolas" FontSize="12"
-                     BorderBrush="LightGray" BorderThickness="1"
-                     VirtualizingStackPanel.IsVirtualizing="False"
-                     ScrollViewer.HorizontalScrollBarVisibility="Auto"
-                     ScrollViewer.VerticalScrollBarVisibility="Auto"/>
-        </DockPanel>
+        <!-- 로그 영역 (탭) -->
+        <TabControl Grid.Row="5" Margin="0,4,0,0">
+            <TabItem Header="감시 로그">
+                <ListBox x:Name="WatchLogListBox" ItemsSource="{Binding WatchLogs}"
+                         FontFamily="Consolas" FontSize="12"
+                         BorderBrush="LightGray" BorderThickness="1"
+                         VirtualizingStackPanel.IsVirtualizing="False"
+                         ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto"/>
+            </TabItem>
+            <TabItem Header="배포 로그">
+                <ListBox x:Name="DeployLogListBox" ItemsSource="{Binding DeployLogs}"
+                         FontFamily="Consolas" FontSize="12"
+                         BorderBrush="LightGray" BorderThickness="1"
+                         VirtualizingStackPanel.IsVirtualizing="False"
+                         ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto"/>
+            </TabItem>
+        </TabControl>
     </Grid>
 </Window>
