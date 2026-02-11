@@ -141,7 +141,7 @@ namespace DeployMonitor
             };
 
             logWindow.Content = textBox;
-            logWindow.ShowDialog();
+            logWindow.Show();
         }
     }
 }
