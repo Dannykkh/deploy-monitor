@@ -253,6 +253,7 @@ namespace DeployMonitor.Services
                 if (currentHash != knownHash)
                 {
                     _knownHashes[project.Name] = currentHash;
+                    project.LastCommitDetectedTime = DateTime.Now.ToString("HH:mm:ss");
 
                     var shortHash = currentHash.Length >= 7 ? currentHash[..7] : currentHash;
                     LogMessage?.Invoke($"[{project.Name}] 새 커밋 감지 ({shortHash})");

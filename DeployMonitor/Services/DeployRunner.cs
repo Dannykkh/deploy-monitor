@@ -68,12 +68,23 @@ namespace DeployMonitor.Services
         /// <summary>단일 프로젝트 배포 실행</summary>
         private async Task RunDeployAsync(ProjectInfo project)
         {
+            // 배포별 로그 수집용
+            var deployLog = new System.Text.StringBuilder();
+            void Log(string msg)
+            {
+                var line = $"[{DateTime.Now:HH:mm:ss}] {msg}";
+                deployLog.AppendLine(line);
+                LogMessage?.Invoke($"[{project.Name}] {msg}");
+            }
+
             if (string.IsNullOrEmpty(project.DeployPath))
             {
+                Log("deploy 경로 없음");
                 UpdateUI(() =>
                 {
                     project.Status = ProjectStatus.Error;
                     project.LastMessage = "deploy 경로 없음";
+                    project.LastDeploymentLog = deployLog.ToString();
                 });
                 return;
             }
@@ -84,16 +95,19 @@ namespace DeployMonitor.Services
                 project.LastMessage = "소스 동기화 중...";
             });
 
+            Log("소스 동기화 시작");
+
             // 1. 소스코드 동기화 (clone 또는 pull)
-            var syncResult = await SyncSourceCodeAsync(project);
+            var syncResult = await SyncSourceCodeAsync(project, deployLog);
             if (!syncResult)
             {
+                UpdateUI(() => project.LastDeploymentLog = deployLog.ToString());
                 DeployCompleted?.Invoke(project.Name, false);
                 return;
             }
 
             UpdateUI(() => project.LastMessage = "deploy.bat 실행중...");
-            LogMessage?.Invoke($"[{project.Name}] deploy.bat auto 실행");
+            Log("deploy.bat auto 실행");
 
             try
             {
@@ -114,13 +128,19 @@ namespace DeployMonitor.Services
                 process.OutputDataReceived += (_, e) =>
                 {
                     if (!string.IsNullOrEmpty(e.Data))
+                    {
+                        deployLog.AppendLine(e.Data);
                         LogMessage?.Invoke($"[{project.Name}] {e.Data}");
+                    }
                 };
 
                 process.ErrorDataReceived += (_, e) =>
                 {
                     if (!string.IsNullOrEmpty(e.Data))
+                    {
+                        deployLog.AppendLine($"[ERR] {e.Data}");
                         LogMessage?.Invoke($"[{project.Name}] [ERR] {e.Data}");
+                    }
                 };
 
                 process.Start();
@@ -133,10 +153,12 @@ namespace DeployMonitor.Services
                 if (!completed)
                 {
                     try { process.Kill(entireProcessTree: true); } catch { }
+                    deployLog.AppendLine("[TIMEOUT] 배포 타임아웃 (10분 초과)");
                     UpdateUI(() =>
                     {
                         project.Status = ProjectStatus.Error;
                         project.LastMessage = "타임아웃 (10분 초과)";
+                        project.LastDeploymentLog = deployLog.ToString();
                     });
                     LogMessage?.Invoke($"[{project.Name}] 배포 타임아웃");
                     DeployCompleted?.Invoke(project.Name, false);
@@ -153,22 +175,26 @@ namespace DeployMonitor.Services
 
                     if (dockerStatus.AllRunning)
                     {
+                        deployLog.AppendLine($"[SUCCESS] {dockerStatus.Summary}");
                         UpdateUI(() =>
                         {
                             project.Status = ProjectStatus.Success;
                             project.LastDeployTime = $"{now} 배포완료";
                             project.LastMessage = dockerStatus.Summary;
+                            project.LastDeploymentLog = deployLog.ToString();
                         });
                         LogMessage?.Invoke($"[{project.Name}] 배포 완료 - {dockerStatus.Summary}");
                         DeployCompleted?.Invoke(project.Name, true);
                     }
                     else
                     {
+                        deployLog.AppendLine($"[ERROR] 컨테이너 오류 - {dockerStatus.Summary}");
                         UpdateUI(() =>
                         {
                             project.Status = ProjectStatus.Error;
                             project.LastDeployTime = $"{now} 컨테이너 오류";
                             project.LastMessage = dockerStatus.Summary;
+                            project.LastDeploymentLog = deployLog.ToString();
                         });
                         LogMessage?.Invoke($"[{project.Name}] 컨테이너 오류 - {dockerStatus.Summary}");
 
@@ -183,11 +209,13 @@ namespace DeployMonitor.Services
                 }
                 else
                 {
+                    deployLog.AppendLine($"[ERROR] 배포 실패 (exit code {exitCode})");
                     UpdateUI(() =>
                     {
                         project.Status = ProjectStatus.Error;
                         project.LastDeployTime = $"{now} 오류";
                         project.LastMessage = $"배포 실패 (exit code {exitCode})";
+                        project.LastDeploymentLog = deployLog.ToString();
                     });
                     LogMessage?.Invoke($"[{project.Name}] 배포 실패 (exit code {exitCode})");
                     DeployCompleted?.Invoke(project.Name, false);
@@ -195,10 +223,12 @@ namespace DeployMonitor.Services
             }
             catch (Exception ex)
             {
+                deployLog.AppendLine($"[EXCEPTION] {ex.Message}");
                 UpdateUI(() =>
                 {
                     project.Status = ProjectStatus.Error;
                     project.LastMessage = $"실행 오류: {ex.Message}";
+                    project.LastDeploymentLog = deployLog.ToString();
                 });
                 LogMessage?.Invoke($"[{project.Name}] 실행 오류: {ex.Message}");
                 DeployCompleted?.Invoke(project.Name, false);
@@ -206,7 +236,7 @@ namespace DeployMonitor.Services
         }
 
         /// <summary>소스코드 동기화 (clone 또는 pull)</summary>
-        private async Task<bool> SyncSourceCodeAsync(ProjectInfo project)
+        private async Task<bool> SyncSourceCodeAsync(ProjectInfo project, System.Text.StringBuilder? deployLog = null)
         {
             var deployPath = project.DeployPath!; // 호출 전에 null 체크됨
             var gitDir = Path.Combine(deployPath, ".git");
@@ -215,12 +245,14 @@ namespace DeployMonitor.Services
             if (isGitRepo)
             {
                 // 이미 clone된 상태 → git pull
+                deployLog?.AppendLine("git pull 실행");
                 LogMessage?.Invoke($"[{project.Name}] git pull 실행");
-                return await RunGitCommandAsync(project, "pull", deployPath);
+                return await RunGitCommandAsync(project, "pull", deployPath, deployLog);
             }
             else
             {
                 // 최초 → git clone
+                deployLog?.AppendLine("git clone 실행 (최초)");
                 LogMessage?.Invoke($"[{project.Name}] git clone 실행 (최초)");
 
                 // 배포 폴더의 부모 디렉토리에서 clone 실행
@@ -236,6 +268,7 @@ namespace DeployMonitor.Services
                     }
                     catch (Exception ex)
                     {
+                        deployLog?.AppendLine($"[ERROR] 기존 폴더 삭제 실패: {ex.Message}");
                         LogMessage?.Invoke($"[{project.Name}] 기존 폴더 삭제 실패: {ex.Message}");
                         UpdateUI(() =>
                         {
@@ -248,12 +281,12 @@ namespace DeployMonitor.Services
 
                 // git clone (bare repo에서 clone, 브랜치 지정)
                 var cloneArgs = $"clone --branch {project.Branch} \"{project.BareRepoPath}\" \"{folderName}\"";
-                return await RunGitCommandAsync(project, cloneArgs, parentDir);
+                return await RunGitCommandAsync(project, cloneArgs, parentDir, deployLog);
             }
         }
 
         /// <summary>git 명령 실행</summary>
-        private async Task<bool> RunGitCommandAsync(ProjectInfo project, string args, string workingDir)
+        private async Task<bool> RunGitCommandAsync(ProjectInfo project, string args, string workingDir, System.Text.StringBuilder? deployLog = null)
         {
             try
             {
@@ -273,13 +306,19 @@ namespace DeployMonitor.Services
                 process.OutputDataReceived += (_, e) =>
                 {
                     if (!string.IsNullOrEmpty(e.Data))
+                    {
+                        deployLog?.AppendLine(e.Data);
                         LogMessage?.Invoke($"[{project.Name}] {e.Data}");
+                    }
                 };
 
                 process.ErrorDataReceived += (_, e) =>
                 {
                     if (!string.IsNullOrEmpty(e.Data))
+                    {
+                        deployLog?.AppendLine(e.Data);
                         LogMessage?.Invoke($"[{project.Name}] {e.Data}");
+                    }
                 };
 
                 process.Start();
@@ -291,6 +330,7 @@ namespace DeployMonitor.Services
                 if (!completed)
                 {
                     try { process.Kill(entireProcessTree: true); } catch { }
+                    deployLog?.AppendLine("[TIMEOUT] git 명령 타임아웃");
                     LogMessage?.Invoke($"[{project.Name}] git 명령 타임아웃");
                     UpdateUI(() =>
                     {
@@ -302,6 +342,7 @@ namespace DeployMonitor.Services
 
                 if (process.ExitCode != 0)
                 {
+                    deployLog?.AppendLine($"[ERROR] git 명령 실패 (exit code {process.ExitCode})");
                     LogMessage?.Invoke($"[{project.Name}] git 명령 실패 (exit code {process.ExitCode})");
                     UpdateUI(() =>
                     {

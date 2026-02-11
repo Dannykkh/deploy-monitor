@@ -30,6 +30,8 @@ namespace DeployMonitor.Models
         private ProjectStatus _status = ProjectStatus.Idle;
         private string _lastDeployTime = "";
         private string _lastMessage = "";
+        private string _lastCommitDetectedTime = "";
+        private string _lastDeploymentLog = "";
 
         /// <summary>프로젝트명 (폴더명에서 .git 제거)</summary>
         public string Name
@@ -96,6 +98,20 @@ namespace DeployMonitor.Models
         {
             get => _lastMessage;
             set => SetField(ref _lastMessage, value);
+        }
+
+        /// <summary>마지막 커밋 감지 시간</summary>
+        public string LastCommitDetectedTime
+        {
+            get => _lastCommitDetectedTime;
+            set => SetField(ref _lastCommitDetectedTime, value);
+        }
+
+        /// <summary>마지막 배포 로그 (상세)</summary>
+        public string LastDeploymentLog
+        {
+            get => _lastDeploymentLog;
+            set => SetField(ref _lastDeploymentLog, value);
         }
 
         /// <summary>UI 표시용 상태 텍스트</summary>

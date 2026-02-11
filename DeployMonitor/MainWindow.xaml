@@ -85,12 +85,13 @@
         <Separator Grid.Row="2" Margin="0,0,0,4"/>
 
         <!-- 프로젝트 목록 -->
-        <DataGrid Grid.Row="3" ItemsSource="{Binding Projects}"
+        <DataGrid Grid.Row="3" x:Name="ProjectGrid" ItemsSource="{Binding Projects}"
                   AutoGenerateColumns="False" IsReadOnly="True"
                   SelectionMode="Single" HeadersVisibility="Column"
                   GridLinesVisibility="Horizontal" AlternatingRowBackground="#F8F8F8"
                   CanUserResizeRows="False" CanUserReorderColumns="False"
-                  BorderBrush="LightGray" BorderThickness="1">
+                  BorderBrush="LightGray" BorderThickness="1"
+                  MouseDoubleClick="ProjectGrid_MouseDoubleClick">
             <DataGrid.Columns>
                 <DataGridTextColumn Header="프로젝트" Binding="{Binding Name}" Width="*" MinWidth="120">
                     <DataGridTextColumn.ElementStyle>
@@ -112,7 +113,17 @@
                     </DataGridTextColumn.ElementStyle>
                 </DataGridTextColumn>
 
-                <DataGridTextColumn Header="마지막 배포" Binding="{Binding LastDeployTime}" Width="140">
+                <DataGridTextColumn Header="커밋감지" Binding="{Binding LastCommitDetectedTime}" Width="70">
+                    <DataGridTextColumn.ElementStyle>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="VerticalAlignment" Value="Center"/>
+                            <Setter Property="Padding" Value="4,0"/>
+                            <Setter Property="Foreground" Value="DimGray"/>
+                        </Style>
+                    </DataGridTextColumn.ElementStyle>
+                </DataGridTextColumn>
+
+                <DataGridTextColumn Header="마지막 배포" Binding="{Binding LastDeployTime}" Width="120">
                     <DataGridTextColumn.ElementStyle>
                         <Style TargetType="TextBlock">
                             <Setter Property="VerticalAlignment" Value="Center"/>
@@ -121,7 +132,7 @@
                     </DataGridTextColumn.ElementStyle>
                 </DataGridTextColumn>
 
-                <DataGridTextColumn Header="메시지" Binding="{Binding LastMessage}" Width="*" MinWidth="140">
+                <DataGridTextColumn Header="메시지" Binding="{Binding LastMessage}" Width="*" MinWidth="100">
                     <DataGridTextColumn.ElementStyle>
                         <Style TargetType="TextBlock">
                             <Setter Property="Foreground" Value="Gray"/>

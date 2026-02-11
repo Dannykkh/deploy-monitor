@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using DeployMonitor.Models;
 using DeployMonitor.ViewModels;
 
 namespace DeployMonitor
@@ -101,6 +103,45 @@ namespace DeployMonitor
                 }
                 catch { }
             });
+        }
+
+        /// <summary>프로젝트 행 더블클릭 시 상세 로그 표시</summary>
+        private void ProjectGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+        {
+            if (ProjectGrid.SelectedItem is not ProjectInfo project) return;
+
+            var log = project.LastDeploymentLog;
+            if (string.IsNullOrWhiteSpace(log))
+            {
+                MessageBox.Show("배포 로그가 없습니다.", project.Name, MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            // 로그 표시 창
+            var logWindow = new Window
+            {
+                Title = $"[{project.Name}] 배포 로그",
+                Width = 800,
+                Height = 500,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this
+            };
+
+            var textBox = new TextBox
+            {
+                Text = log,
+                IsReadOnly = true,
+                FontFamily = new System.Windows.Media.FontFamily("Consolas"),
+                FontSize = 12,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                TextWrapping = TextWrapping.NoWrap,
+                AcceptsReturn = true,
+                Margin = new Thickness(8)
+            };
+
+            logWindow.Content = textBox;
+            logWindow.ShowDialog();
         }
     }
 }
