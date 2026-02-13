@@ -32,6 +32,7 @@ namespace DeployMonitor.Models
         private string _lastMessage = "";
         private string _lastCommitDetectedTime = "";
         private string _lastDeploymentLog = "";
+        private string _containerPrefix = "";
 
         /// <summary>프로젝트명 (폴더명에서 .git 제거)</summary>
         public string Name
@@ -105,6 +106,13 @@ namespace DeployMonitor.Models
         {
             get => _lastCommitDetectedTime;
             set => SetField(ref _lastCommitDetectedTime, value);
+        }
+
+        /// <summary>Docker 컨테이너 이름 접두사 (deploy.bat의 PROJECT_NAME). 미설정 시 Name 사용</summary>
+        public string ContainerPrefix
+        {
+            get => string.IsNullOrEmpty(_containerPrefix) ? _name : _containerPrefix;
+            set => SetField(ref _containerPrefix, value);
         }
 
         /// <summary>마지막 배포 로그 (상세)</summary>

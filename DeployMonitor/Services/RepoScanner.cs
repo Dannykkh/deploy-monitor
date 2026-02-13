@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using DeployMonitor.Models;
 
 namespace DeployMonitor.Services
@@ -64,6 +65,15 @@ namespace DeployMonitor.Services
 
                 DebugLog?.Invoke($"[DEBUG] [{projectName}] deploy.bat 발견: {foundPath}");
 
+                // deploy.bat에서 Docker 컨테이너 접두사 추출
+                var containerPrefix = "";
+                if (TryReadDeployBatFromRepo(dir, defaultBranch, projectName, out var batContent, out _, DebugLog))
+                {
+                    containerPrefix = ExtractProjectName(batContent);
+                    if (!string.IsNullOrEmpty(containerPrefix))
+                        DebugLog?.Invoke($"[DEBUG] [{projectName}] PROJECT_NAME={containerPrefix}");
+                }
+
                 // 현재 커밋 해시 읽기
                 var commitHash = ReadCommitHash(dir, defaultBranch);
 
@@ -75,6 +85,7 @@ namespace DeployMonitor.Services
                     HasDeployBat = hasDeployBat,
                     Branch = defaultBranch,
                     LastCommitHash = commitHash,
+                    ContainerPrefix = containerPrefix,
                     Status = ProjectStatus.Idle,
                     LastMessage = ""
                 });
@@ -193,6 +204,16 @@ namespace DeployMonitor.Services
                 debugLog?.Invoke($"[DEBUG] TryReadDeployBat 예외: {ex.Message}");
                 return false;
             }
+        }
+
+        /// <summary>
+        /// deploy.bat 내용에서 PROJECT_NAME 값을 추출한다.
+        /// 패턴: set "PROJECT_NAME=xxx" 또는 set PROJECT_NAME=xxx
+        /// </summary>
+        private static string ExtractProjectName(string batContent)
+        {
+            var match = Regex.Match(batContent, @"set\s+""?PROJECT_NAME=([^""\r\n]+)""?", RegexOptions.IgnoreCase);
+            return match.Success ? match.Groups[1].Value.Trim() : "";
         }
 
         private static bool TryFindDeployBatPath(
