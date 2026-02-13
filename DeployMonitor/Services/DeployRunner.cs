@@ -373,12 +373,14 @@ namespace DeployMonitor.Services
 
             try
             {
-                // 컨테이너 접두사로 시작하는 컨테이너 조회 (ContainerPrefix = deploy.bat의 PROJECT_NAME)
-                var prefix = project.ContainerPrefix;
+                // 컨테이너 접두사로 검색 (ContainerPrefix 우선, 없으면 Name 사용, 소문자 변환, 구분자 무관)
+                var prefix = !string.IsNullOrEmpty(project.ContainerPrefix)
+                    ? project.ContainerPrefix.ToLowerInvariant()
+                    : project.Name.ToLowerInvariant();
                 var psi = new ProcessStartInfo
                 {
                     FileName = "docker",
-                    Arguments = $"ps -a --filter \"name={prefix}-\" --format \"{{{{.Names}}}}|{{{{.Status}}}}|{{{{.State}}}}\"",
+                    Arguments = $"ps -a --filter \"name={prefix}\" --format \"{{{{.Names}}}}|{{{{.Status}}}}|{{{{.State}}}}\"",
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
