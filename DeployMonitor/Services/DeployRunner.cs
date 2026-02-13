@@ -373,14 +373,16 @@ namespace DeployMonitor.Services
 
             try
             {
-                // 컨테이너 접두사로 검색 (ContainerPrefix 우선, 없으면 Name 사용, 소문자 변환, 구분자 무관)
+                // 컨테이너 접두사 (ContainerPrefix 우선, 없으면 Name 사용)
                 var prefix = !string.IsNullOrEmpty(project.ContainerPrefix)
-                    ? project.ContainerPrefix.ToLowerInvariant()
-                    : project.Name.ToLowerInvariant();
+                    ? project.ContainerPrefix
+                    : project.Name;
+
+                // Docker 필터는 대소문자 구분하므로, 전체 조회 후 C#에서 필터링
                 var psi = new ProcessStartInfo
                 {
                     FileName = "docker",
-                    Arguments = $"ps -a --filter \"name={prefix}\" --format \"{{{{.Names}}}}|{{{{.Status}}}}|{{{{.State}}}}\"",
+                    Arguments = "ps -a --format \"{{.Names}}|{{.Status}}|{{.State}}\"",
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -399,7 +401,17 @@ namespace DeployMonitor.Services
                     return result;
                 }
 
-                var lines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                // 대소문자 무시하고 프로젝트명 포함된 컨테이너만 필터링
+                var allLines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                var lines = allLines.Where(line =>
+                    line.Split('|')[0].Contains(prefix, StringComparison.OrdinalIgnoreCase)).ToArray();
+
+                if (lines.Length == 0)
+                {
+                    result.Summary = "컨테이너 없음";
+                    return result;
+                }
+
                 var running = 0;
                 var total = 0;
 
