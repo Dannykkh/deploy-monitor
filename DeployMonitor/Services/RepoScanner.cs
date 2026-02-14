@@ -67,11 +67,16 @@ namespace DeployMonitor.Services
 
                 // deploy.bat에서 Docker 컨테이너 접두사 추출
                 var containerPrefix = "";
+                var deployTriggers = "";
                 if (TryReadDeployBatFromRepo(dir, defaultBranch, projectName, out var batContent, out _, DebugLog))
                 {
                     containerPrefix = ExtractProjectName(batContent);
                     if (!string.IsNullOrEmpty(containerPrefix))
                         DebugLog?.Invoke($"[DEBUG] [{projectName}] PROJECT_NAME={containerPrefix}");
+
+                    deployTriggers = ExtractDeployTriggers(batContent);
+                    if (!string.IsNullOrEmpty(deployTriggers))
+                        DebugLog?.Invoke($"[DEBUG] [{projectName}] DEPLOY_TRIGGERS={deployTriggers}");
                 }
 
                 // 현재 커밋 해시 읽기
@@ -86,6 +91,7 @@ namespace DeployMonitor.Services
                     Branch = defaultBranch,
                     LastCommitHash = commitHash,
                     ContainerPrefix = containerPrefix,
+                    DeployTriggers = deployTriggers,
                     Status = ProjectStatus.Idle,
                     LastMessage = ""
                 });
@@ -204,6 +210,16 @@ namespace DeployMonitor.Services
                 debugLog?.Invoke($"[DEBUG] TryReadDeployBat 예외: {ex.Message}");
                 return false;
             }
+        }
+
+        /// <summary>
+        /// deploy.bat 내용에서 DEPLOY_TRIGGERS 값을 추출한다.
+        /// 패턴: set "DEPLOY_TRIGGERS=path1 path2" 또는 set DEPLOY_TRIGGERS=path1 path2
+        /// </summary>
+        private static string ExtractDeployTriggers(string batContent)
+        {
+            var match = Regex.Match(batContent, @"set\s+""?DEPLOY_TRIGGERS=([^""\r\n]+)""?", RegexOptions.IgnoreCase);
+            return match.Success ? match.Groups[1].Value.Trim() : "";
         }
 
         /// <summary>

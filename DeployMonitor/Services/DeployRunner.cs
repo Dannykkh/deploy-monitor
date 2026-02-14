@@ -106,6 +106,27 @@ namespace DeployMonitor.Services
                 return;
             }
 
+            // 선택적 배포 트리거 확인
+            if (!string.IsNullOrEmpty(project.DeployTriggers) && !string.IsNullOrEmpty(project.PreviousCommitHash))
+            {
+                UpdateUI(() => project.LastMessage = "변경 파일 확인 중...");
+                Log($"배포 트리거 확인: {project.DeployTriggers}");
+
+                var shouldDeploy = await CheckDeployTriggersAsync(project, deployLog);
+                if (!shouldDeploy)
+                {
+                    Log("[SKIP] 배포 대상 변경 없음 - 빌드 생략");
+                    UpdateUI(() =>
+                    {
+                        project.Status = ProjectStatus.Idle;
+                        project.LastMessage = "변경 없음 - 빌드 생략";
+                        project.LastDeploymentLog = deployLog.ToString();
+                    });
+                    DeployCompleted?.Invoke(project.Name, true);
+                    return;
+                }
+            }
+
             UpdateUI(() => project.LastMessage = "deploy.bat 실행중...");
             Log("deploy.bat auto 실행");
 
@@ -232,6 +253,73 @@ namespace DeployMonitor.Services
                 });
                 LogMessage?.Invoke($"[{project.Name}] 실행 오류: {ex.Message}");
                 DeployCompleted?.Invoke(project.Name, false);
+            }
+        }
+
+        /// <summary>변경 파일이 배포 트리거 경로에 해당하는지 확인</summary>
+        private async Task<bool> CheckDeployTriggersAsync(ProjectInfo project, System.Text.StringBuilder deployLog)
+        {
+            try
+            {
+                var triggers = project.DeployTriggers.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (triggers.Length == 0) return true;
+
+                // bare repo에서 이전 커밋과 현재 커밋 사이의 변경 파일 조회
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "git",
+                    Arguments = $"--git-dir \"{project.BareRepoPath}\" diff --name-only {project.PreviousCommitHash} {project.LastCommitHash}",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using var process = new Process { StartInfo = psi };
+                process.Start();
+
+                var output = await process.StandardOutput.ReadToEndAsync();
+                await process.WaitForExitAsync();
+
+                if (process.ExitCode != 0)
+                {
+                    deployLog.AppendLine("[WARN] git diff 실패 - 배포 진행");
+                    return true;
+                }
+
+                var changedFiles = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                var matched = false;
+
+                foreach (var file in changedFiles)
+                {
+                    var trimmed = file.Trim();
+                    foreach (var trigger in triggers)
+                    {
+                        if (trimmed.StartsWith(trigger, StringComparison.OrdinalIgnoreCase) ||
+                            trimmed.Equals(trigger, StringComparison.OrdinalIgnoreCase))
+                        {
+                            deployLog.AppendLine($"[MATCH] {trimmed} (trigger: {trigger})");
+                            LogMessage?.Invoke($"[{project.Name}] [MATCH] {trimmed}");
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!matched)
+                {
+                    deployLog.AppendLine($"변경 파일 {changedFiles.Length}개 중 트리거 매칭 없음");
+                    deployLog.AppendLine($"트리거: {project.DeployTriggers}");
+                    foreach (var file in changedFiles)
+                        deployLog.AppendLine($"  - {file.Trim()}");
+                }
+
+                return matched;
+            }
+            catch (Exception ex)
+            {
+                deployLog.AppendLine($"[WARN] 트리거 확인 실패: {ex.Message} - 배포 진행");
+                return true; // 오류 시 안전하게 배포 진행
             }
         }
 

@@ -33,6 +33,8 @@ namespace DeployMonitor.Models
         private string _lastCommitDetectedTime = "";
         private string _lastDeploymentLog = "";
         private string _containerPrefix = "";
+        private string _deployTriggers = "";
+        private string _previousCommitHash = "";
 
         /// <summary>프로젝트명 (폴더명에서 .git 제거)</summary>
         public string Name
@@ -113,6 +115,20 @@ namespace DeployMonitor.Models
         {
             get => string.IsNullOrEmpty(_containerPrefix) ? _name : _containerPrefix;
             set => SetField(ref _containerPrefix, value);
+        }
+
+        /// <summary>배포 트리거 경로 (공백 구분, deploy.bat의 DEPLOY_TRIGGERS). 비어있으면 모든 변경에 배포</summary>
+        public string DeployTriggers
+        {
+            get => _deployTriggers;
+            set => SetField(ref _deployTriggers, value);
+        }
+
+        /// <summary>이전 커밋 해시 (선택적 배포 판단용, CommitWatcher에서 설정)</summary>
+        public string PreviousCommitHash
+        {
+            get => _previousCommitHash;
+            set => SetField(ref _previousCommitHash, value);
         }
 
         /// <summary>마지막 배포 로그 (상세)</summary>

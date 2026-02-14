@@ -252,6 +252,7 @@ namespace DeployMonitor.Services
                 // 해시가 다르면 새 커밋
                 if (currentHash != knownHash)
                 {
+                    project.PreviousCommitHash = knownHash; // 선택적 배포 판단용
                     _knownHashes[project.Name] = currentHash;
                     project.LastCommitDetectedTime = DateTime.Now.ToString("HH:mm:ss");
 
