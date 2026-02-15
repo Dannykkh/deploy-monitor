@@ -1,157 +1,128 @@
-# deploy.bat 선택적 배포 트리거 개선
+# deploy.bat 선택적 배포 트리거
 
-## 왜 바꿔야 하는가
+## 왜 필요한가
 
-현재 DeployMonitor는 bare repo에서 커밋 해시 변경을 감지하면 **무조건 git pull + deploy.bat 실행**을 수행한다.
-하나의 저장소에 서버/클라이언트가 공존하는 경우, 배포 대상이 아닌 코드만 변경되어도 **불필요한 빌드 + 다운타임**이 발생한다.
-
----
-
-## 해결 방법
-
-각 프로젝트의 `deploy.bat`에 `DEPLOY_TRIGGERS` 설정 변수를 선언한다.
-DeployMonitor가 git pull 후 변경된 파일이 트리거 경로에 해당하는지 확인하고, 해당 없으면 배포를 스킵한다.
+DeployMonitor는 bare repo에서 커밋 해시 변경을 감지하면 **무조건 git pull + deploy.bat 실행**을 수행한다.
+하나의 저장소에 서버/클라이언트가 공존하는 경우, 배포 대상이 아닌 코드(프론트엔드, 문서 등)만 변경되어도 **불필요한 Docker 빌드 + 다운타임**이 발생한다.
 
 ---
 
-## 1단계: deploy.bat에 설정 변수 추가
+## 사용법
+
+각 프로젝트의 `deploy.bat` 상단에 `DEPLOY_TRIGGERS` 변수를 추가한다.
 
 ```bat
 REM === Deploy Trigger Config ===
 REM 이 경로에 변경이 있을 때만 배포 진행 (공백으로 구분)
-REM 미설정 시 모든 변경에 대해 배포 진행 (기존 동작 유지)
-set "DEPLOY_TRIGGERS=<서버소스경로>/ <Docker설정경로>/ deploy.bat"
+set "DEPLOY_TRIGGERS=backend-spring/ docker-images/ deploy.bat"
 ```
 
-프로젝트 구조에 맞게 경로를 지정한다. 디렉토리는 `/`로 끝내고, 개별 파일은 파일명을 그대로 쓴다.
+- 디렉토리는 `/`로 끝낸다 (예: `backend-spring/`)
+- 개별 파일은 파일명 그대로 쓴다 (예: `deploy.bat`)
+- **미설정 시 기존 동작 유지** — 모든 변경에 대해 배포
 
-```
-예) 모노레포 (서버 + 클라이언트)
-    set "DEPLOY_TRIGGERS=backend/ docker-images/ deploy.bat"
+### 프로젝트별 예시
 
-예) 서버만 있는 저장소 (설정 불필요)
-    DEPLOY_TRIGGERS 미설정 → 모든 변경에 대해 배포 (기존 동작)
-```
+| 프로젝트 구조 | DEPLOY_TRIGGERS |
+|---------------|----------------|
+| 모노레포 (서버 + 앱) | `backend-spring/ docker-images/ deploy.bat` |
+| 모노레포 (서버 + 웹) | `backend/ docker/ deploy.bat` |
+| 서버만 있는 저장소 | 미설정 (모든 변경에 배포) |
 
 ---
 
-## 2단계: DeployMonitor C# 수정
+## 구현 (완료)
 
-### 2-1. ProjectInfo.cs - 속성 추가
+### 수정 파일
+
+| 파일 | 변경 내용 |
+|------|-----------|
+| `ProjectInfo.cs` | `DeployTriggers` (string), `PreviousCommitHash` (string) 프로퍼티 추가 |
+| `RepoScanner.cs` | `ExtractDeployTriggers()` — deploy.bat에서 DEPLOY_TRIGGERS 값 파싱 |
+| `CommitWatcher.cs` | 새 커밋 감지 시 `PreviousCommitHash`에 이전 해시 보존 |
+| `DeployRunner.cs` | `CheckDeployTriggersAsync()` — 변경 파일 vs 트리거 경로 비교, 불일치 시 배포 생략 |
+
+### 핵심 로직
+
+**CommitWatcher.CheckProject()** — 이전 해시 보존:
 
 ```csharp
-/// <summary>배포 트리거 경로 목록 (deploy.bat의 DEPLOY_TRIGGERS)</summary>
-public List<string> DeployTriggers { get; set; } = new();
-```
-
-### 2-2. RepoScanner.cs - DEPLOY_TRIGGERS 추출
-
-`ExtractProjectName()`처럼 deploy.bat 내용에서 DEPLOY_TRIGGERS를 파싱한다.
-
-```csharp
-/// <summary>deploy.bat에서 DEPLOY_TRIGGERS 값을 추출</summary>
-private static List<string> ExtractDeployTriggers(string batContent)
+if (currentHash != knownHash)
 {
-    var match = Regex.Match(batContent,
-        @"set\s+""?DEPLOY_TRIGGERS=([^""\r\n]+)""?",
-        RegexOptions.IgnoreCase);
-
-    if (!match.Success) return new List<string>(); // 미설정 = 빈 리스트
-
-    return match.Groups[1].Value
-        .Split(' ', StringSplitOptions.RemoveEmptyEntries)
-        .ToList();
+    project.PreviousCommitHash = knownHash; // 이전 해시 저장
+    _knownHashes[project.Name] = currentHash;
+    CommitDetected?.Invoke(project, currentHash);
 }
 ```
 
-`Scan()` 메서드의 프로젝트 생성 부분에 추가:
+**DeployRunner.RunDeployAsync()** — git pull 후, deploy.bat 실행 전 체크:
 
 ```csharp
-var deployTriggers = ExtractDeployTriggers(batContent);
-
-projects.Add(new ProjectInfo
+if (!string.IsNullOrEmpty(project.DeployTriggers) && !string.IsNullOrEmpty(project.PreviousCommitHash))
 {
-    // ... 기존 필드 ...
-    DeployTriggers = deployTriggers,
-});
-```
-
-### 2-3. DeployRunner.cs - 변경 파일 필터링
-
-`RunDeployAsync()`에서 git pull 성공 후, deploy.bat 실행 전에 체크 로직을 추가한다.
-
-```csharp
-// git pull 성공 후 ---
-
-// DEPLOY_TRIGGERS가 설정된 경우에만 필터링 (미설정 = 무조건 배포)
-if (project.DeployTriggers.Count > 0)
-{
-    var changedFiles = await GetChangedFilesAsync(project);
-
-    var needDeploy = changedFiles.Any(file =>
-        project.DeployTriggers.Any(trigger =>
-            file.StartsWith(trigger, StringComparison.OrdinalIgnoreCase)));
-
-    if (!needDeploy)
+    var shouldDeploy = await CheckDeployTriggersAsync(project, deployLog);
+    if (!shouldDeploy)
     {
-        Log("배포 대상 변경 없음 - 스킵");
-        UpdateUI(() =>
-        {
-            project.Status = ProjectStatus.Idle;
-            project.LastMessage = "변경 감지됨 (배포 대상 아님)";
-        });
-        return; // deploy.bat 실행하지 않음
+        // deploy.bat 실행하지 않음
+        project.Status = ProjectStatus.Idle;
+        project.LastMessage = "변경 없음 - 빌드 생략";
+        return;
     }
 }
-
-// --- deploy.bat auto 실행 ---
 ```
 
-변경 파일 목록을 가져오는 헬퍼:
+**DeployRunner.CheckDeployTriggersAsync()** — bare repo에서 변경 파일 비교:
 
 ```csharp
-/// <summary>직전 pull로 변경된 파일 목록 조회</summary>
-private async Task<List<string>> GetChangedFilesAsync(ProjectInfo project)
-{
-    var psi = new ProcessStartInfo
-    {
-        FileName = "git",
-        Arguments = "diff --name-only HEAD@{1} HEAD",
-        WorkingDirectory = project.DeployPath,
-        RedirectStandardOutput = true,
-        UseShellExecute = false,
-        CreateNoWindow = true
-    };
+// bare repo에서 이전 커밋 ~ 현재 커밋 사이 변경 파일 조회
+git --git-dir "{bareRepoPath}" diff --name-only {PreviousCommitHash} {LastCommitHash}
 
-    using var process = new Process { StartInfo = psi };
-    process.Start();
-    var output = await process.StandardOutput.ReadToEndAsync();
-    await process.WaitForExitAsync();
-
-    return output.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                 .Select(f => f.Trim())
-                 .ToList();
-}
+// 변경 파일이 트리거 경로로 시작하면 매칭
+trimmed.StartsWith(trigger, StringComparison.OrdinalIgnoreCase)
 ```
+
+`HEAD@{1}` 대신 `PreviousCommitHash`를 사용하여 reflog에 의존하지 않고 정확한 범위를 비교한다.
 
 ---
 
-## 동작 흐름 (수정 후)
+## 동작 흐름
 
 ```
-CommitWatcher: 커밋 해시 변경 감지
+CommitWatcher: 커밋 해시 변경 감지 (PreviousCommitHash 보존)
     ↓
-DeployRunner: git pull 실행
+DeployRunner: git pull (소스 동기화)
     ↓
 DEPLOY_TRIGGERS 설정됨?
-    ├─ NO → deploy.bat 실행 (기존 동작 유지)
-    └─ YES → 변경 파일이 트리거 경로에 해당?
+    ├─ NO → deploy.bat 실행 (기존 동작)
+    └─ YES → bare repo에서 git diff로 변경 파일 조회
+              ↓
+              변경 파일이 트리거 경로에 해당?
               ├─ YES → deploy.bat 실행
-              └─ NO → 스킵 (로그만 남김)
+              └─ NO → [SKIP] 빌드 생략 (로그 남김)
 ```
+
+### 로그 출력 예시
+
+**배포 대상 변경 있음:**
+```
+[MelatoninApp] 새 커밋 감지 (abc1234)
+[MelatoninApp] 배포 트리거 확인: backend-spring/ docker-images/ deploy.bat
+[MelatoninApp] [MATCH] backend-spring/src/main/java/App.java
+[MelatoninApp] deploy.bat auto 실행
+```
+
+**배포 대상 변경 없음:**
+```
+[MelatoninApp] 새 커밋 감지 (def5678)
+[MelatoninApp] 배포 트리거 확인: backend-spring/ docker-images/ deploy.bat
+[MelatoninApp] [SKIP] 배포 대상 변경 없음 - 빌드 생략
+```
+
+---
 
 ## 참고사항
 
-- `DEPLOY_TRIGGERS`가 미설정(빈 문자열)이면 **기존 동작 그대로** 유지 (하위 호환).
-- `HEAD@{1}`은 git pull 직전 커밋을 가리킨다. pull로 가져온 변경분만 비교.
-- 여러 커밋이 한번에 pull되어도 `HEAD@{1}..HEAD` 전체 diff를 보므로 누락 없음.
+- `DEPLOY_TRIGGERS` 미설정 = 기존 동작 유지 (하위 호환)
+- 트리거 확인 중 git diff 실패 시 안전하게 배포 진행 (false positive 방지)
+- 여러 커밋이 한번에 push되어도 `PreviousCommitHash..LastCommitHash` 전체 diff를 보므로 누락 없음
+- 수동 배포 버튼은 트리거 체크 없이 항상 실행됨
