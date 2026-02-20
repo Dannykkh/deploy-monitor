@@ -12,3 +12,4 @@
 
 # Orchestrator state (auto-generated)
 .orchestrator/
+publish/
