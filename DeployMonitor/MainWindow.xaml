@@ -34,6 +34,22 @@
         </Style>
     </Window.Resources>
 
+    <DockPanel>
+        <!-- Footer StatusBar -->
+        <StatusBar DockPanel.Dock="Bottom" Background="#F0F0F0" BorderBrush="#D0D0D0" BorderThickness="0,1,0,0">
+            <StatusBarItem>
+                <TextBlock Text="{Binding CpuUsage}" FontFamily="Consolas" FontSize="12" Foreground="#333" MinWidth="75"/>
+            </StatusBarItem>
+            <Separator/>
+            <StatusBarItem>
+                <TextBlock Text="{Binding MemUsage}" FontFamily="Consolas" FontSize="12" Foreground="#333" MinWidth="75"/>
+            </StatusBarItem>
+            <Separator/>
+            <StatusBarItem>
+                <TextBlock Text="{Binding GpuUsage}" FontFamily="Consolas" FontSize="12" Foreground="#333" MinWidth="75"/>
+            </StatusBarItem>
+        </StatusBar>
+
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -71,6 +87,8 @@
                 <TextBlock Text="초" VerticalAlignment="Center" Margin="0,0,16,0"/>
                 <TextBlock Text="브랜치:" VerticalAlignment="Center" Margin="0,0,6,0"/>
                 <TextBox Text="{Binding DefaultBranch, UpdateSourceTrigger=PropertyChanged}" Width="100" Padding="4,3"/>
+                <Button Content="Whitelist" Padding="8,3" Margin="12,0,0,0" Click="WhitelistButton_Click" ToolTip="Exited(0) 화이트리스트 관리"/>
+                <Button Content="계정" Padding="8,3" Margin="8,0,0,0" Click="AccountButton_Click" ToolTip="웹 대시보드 계정 설정"/>
             </StackPanel>
         </Grid>
 
@@ -179,4 +197,5 @@
             </TabItem>
         </TabControl>
     </Grid>
+    </DockPanel>
 </Window>

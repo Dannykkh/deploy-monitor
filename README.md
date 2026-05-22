@@ -127,8 +127,26 @@ DeployMonitor/
 | DeployFolder | 배포 작업 폴더 (working copy) | `D:\deploy` |
 | IntervalSeconds | 폴링 주기 (초) | 30 |
 | DefaultBranch | 감시할 브랜치 | master |
+| WebPort | 웹 대시보드 포트 | 5100 |
+| WebListenAnyIP | 원격 PC 접속 허용 (`true`면 `서버IP:포트` 접속 가능) | true |
+| GlobalExitedOkContainers | Exited(0) 허용 컨테이너 전역 화이트리스트 (공백/쉼표 구분) | (빈값) |
 
 > **참고:** 프로그램은 실행 시 자동으로 감시를 시작합니다.
+
+원격 PC에서 웹 접속하려면:
+
+- URL: `http://<DeployMonitor서버IP>:<WebPort>` (기본 `http://<서버IP>:5100`)
+- `WebListenAnyIP=true` 필요
+- Windows 방화벽에서 해당 포트 인바운드 허용 필요
+- 웹 설정 화면에서 `Exited(0) 화이트리스트`와 웹 계정(아이디/비밀번호) 변경 가능
+
+## 웹 로그인 초기 계정
+
+- 초기 DB 생성 시 `admin` 계정을 자동 생성합니다.
+- 비밀번호는 아래 우선순위로 결정됩니다.
+  1. 환경변수 `DEPLOY_MONITOR_ADMIN_PASSWORD` 값
+  2. 랜덤 생성 비밀번호 (앱 폴더의 `admin-initial-password.txt`에 1회 기록)
+- 최초 로그인 후 즉시 비밀번호를 변경하세요.
 
 ## deploy.bat 작성 규칙
 
@@ -145,6 +163,11 @@ if "%1"=="auto" (
     echo [AUTO] 자동 배포 시작
 )
 
+REM 종료 허용 컨테이너(Exited 0) 키워드 - 선택사항
+REM 미설정 시 Exited(0) 컨테이너는 기본 허용
+REM 예: 매일 2시에만 실행되는 백업 잡 컨테이너
+set "EXITED_OK_CONTAINERS=db-backup"
+
 REM git pull은 Deploy Monitor가 자동으로 수행하므로 불필요
 
 REM 빌드
@@ -157,6 +180,12 @@ net start MyService
 
 exit /b 0
 ```
+
+컨테이너 상태 판정 규칙:
+
+- `Exited (0)` + `EXITED_OK_CONTAINERS` 미설정: 정상 종료로 허용
+- `Exited (0)` + `EXITED_OK_CONTAINERS` 설정: 컨테이너 이름이 키워드를 포함하면 허용
+- 그 외 상태(`Exited (1)`, `restarting`, `dead` 등): 오류로 판정
 
 **위치:** 저장소 루트에 `deploy.bat` 파일 배치
 
@@ -202,6 +231,7 @@ exit /b 0
 - 모든 컨테이너가 running 상태면 성공
 - unhealthy 또는 stopped 컨테이너 발견 시 오류 표시
 - 실패한 컨테이너의 최근 로그 20줄 출력
+- 웹 대시보드 프로젝트 행의 `도커` 버튼으로 하위 컨테이너 상태/로그 조회 가능
 
 ## 프로젝트 상태
 

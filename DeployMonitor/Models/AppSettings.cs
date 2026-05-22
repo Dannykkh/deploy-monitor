@@ -24,6 +24,18 @@ namespace DeployMonitor.Models
         /// <summary>프로그램 시작 시 자동 감시 여부</summary>
         public bool AutoStart { get; set; } = false;
 
+        /// <summary>웹 대시보드 포트</summary>
+        public int WebPort { get; set; } = 5100;
+
+        /// <summary>웹 대시보드를 모든 네트워크 인터페이스에 바인딩할지 여부</summary>
+        public bool WebListenAnyIP { get; set; } = true;
+
+        /// <summary>
+        /// Exited(0) 허용 컨테이너 키워드 전역 화이트리스트(공백/쉼표 구분).
+        /// 비어 있으면 기존 규칙(Exited(0) 기본 허용)을 따른다.
+        /// </summary>
+        public string GlobalExitedOkContainers { get; set; } = "";
+
         // --- 저장/로드 ---
 
         private static string GetSettingsPath()

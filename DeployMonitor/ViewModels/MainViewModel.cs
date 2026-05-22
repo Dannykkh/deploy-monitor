@@ -6,12 +6,14 @@ using System.ComponentModel;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Threading;
 using DeployMonitor.Models;
 using DeployMonitor.Services;
+using DeployMonitor.Web.Data;
 
 namespace DeployMonitor.ViewModels
 {
@@ -23,14 +25,25 @@ namespace DeployMonitor.ViewModels
         private readonly RepoScanner _scanner = new();
         private readonly CommitWatcher _watcher = new();
         private readonly DeployRunner _runner = new();
+        private readonly SystemMonitorService _monitor = new();
         private AppSettings _settings;
 
         private string _repoFolder = "";
         private string _deployFolder = "";
         private int _intervalSeconds = 30;
         private string _defaultBranch = "master";
+        private string _globalExitedOkContainers = "";
         private bool _isWatching;
         private string _watchButtonText = "● 감시 시작";
+
+        private string _cpuUsage = "CPU: --%";
+        private string _memUsage = "MEM: --%";
+        private string _gpuUsage = "GPU: --%";
+
+        // Raw system metrics for API
+        private double _rawCpu;
+        private double _rawMem;
+        private double _rawGpu = -1;
 
         // 컬렉션 동기화용 락 객체
         private readonly object _watchLogsLock = new();
@@ -43,6 +56,8 @@ namespace DeployMonitor.ViewModels
             _deployFolder = _settings.DeployFolder;
             _intervalSeconds = _settings.IntervalSeconds;
             _defaultBranch = _settings.DefaultBranch;
+            _globalExitedOkContainers = _settings.GlobalExitedOkContainers;
+            _runner.GlobalExitedOkContainers = _globalExitedOkContainers;
 
             // 컬렉션 스레드 동기화 활성화
             BindingOperations.EnableCollectionSynchronization(WatchLogs, _watchLogsLock);
@@ -55,6 +70,7 @@ namespace DeployMonitor.ViewModels
             _watcher.NewProjectFound += OnNewProjectFound;
             _runner.LogMessage += AddDeployLog;
             _runner.DeployCompleted += OnDeployCompleted;
+            _runner.DeployHistoryEvent += OnDeployHistory;
 
             // 커맨드 초기화
             StartStopCommand = new RelayCommand(ToggleWatch);
@@ -62,6 +78,10 @@ namespace DeployMonitor.ViewModels
             BrowseRepoCommand = new RelayCommand(BrowseRepoFolder);
             BrowseDeployCommand = new RelayCommand(BrowseDeployFolder);
             ManualDeployCommand = new RelayCommand(ManualDeploy);
+
+            // 시스템 모니터 시작
+            _monitor.UsageUpdated += OnUsageUpdated;
+            _monitor.Start();
 
             // 프로그램 로드 후 자동으로 감시 시작 (StartWatch에 스캔 포함)
             Application.Current?.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, ToggleWatch);
@@ -97,6 +117,19 @@ namespace DeployMonitor.ViewModels
             set { if (SetField(ref _defaultBranch, value)) AutoSave(); }
         }
 
+        public string GlobalExitedOkContainers
+        {
+            get => _globalExitedOkContainers;
+            set
+            {
+                if (SetField(ref _globalExitedOkContainers, value))
+                {
+                    _runner.GlobalExitedOkContainers = value ?? "";
+                    AutoSave();
+                }
+            }
+        }
+
         public bool IsWatching
         {
             get => _isWatching;
@@ -113,6 +146,24 @@ namespace DeployMonitor.ViewModels
         {
             get => _watchButtonText;
             private set => SetField(ref _watchButtonText, value);
+        }
+
+        public string CpuUsage
+        {
+            get => _cpuUsage;
+            private set => SetField(ref _cpuUsage, value);
+        }
+
+        public string MemUsage
+        {
+            get => _memUsage;
+            private set => SetField(ref _memUsage, value);
+        }
+
+        public string GpuUsage
+        {
+            get => _gpuUsage;
+            private set => SetField(ref _gpuUsage, value);
         }
 
         // --- 커맨드 ---
@@ -147,6 +198,7 @@ namespace DeployMonitor.ViewModels
                     Projects.Add(p);
 
                 AddWatchLog($"deploy.bat 있는 프로젝트 {list.Count}개 발견");
+                await SyncProjectRuntimeStatusesAsync(list);
 
                 if (wasWatching) StartWatchInternal();
             }
@@ -189,6 +241,7 @@ namespace DeployMonitor.ViewModels
                     Projects.Add(p);
 
                 AddWatchLog($"deploy.bat 있는 프로젝트 {list.Count}개 발견");
+                await SyncProjectRuntimeStatusesAsync(list);
 
                 StartWatchInternal();
             }
@@ -210,6 +263,25 @@ namespace DeployMonitor.ViewModels
             IsWatching = true;
         }
 
+        /// <summary>스캔 직후 Docker 실행 상태를 반영한다.</summary>
+        private async Task SyncProjectRuntimeStatusesAsync(IReadOnlyList<ProjectInfo> list)
+        {
+            if (list.Count == 0)
+                return;
+
+            AddWatchLog("Docker 상태 동기화 중...");
+
+            foreach (var project in list)
+            {
+                await _runner.RefreshProjectStatusFromDockerAsync(project);
+            }
+
+            var successCount = list.Count(p => p.Status == ProjectStatus.Success);
+            var errorCount = list.Count(p => p.Status == ProjectStatus.Error);
+            var idleCount = list.Count(p => p.Status == ProjectStatus.Idle);
+            AddWatchLog($"상태 반영 완료: 정상 {successCount}개, 오류 {errorCount}개, 대기 {idleCount}개");
+        }
+
         private void StopWatch()
         {
             _watcher.Stop();
@@ -223,6 +295,7 @@ namespace DeployMonitor.ViewModels
             _settings.DeployFolder = DeployFolder;
             _settings.IntervalSeconds = IntervalSeconds;
             _settings.DefaultBranch = DefaultBranch;
+            _settings.GlobalExitedOkContainers = GlobalExitedOkContainers;
             _settings.Save();
         }
 
@@ -254,7 +327,7 @@ namespace DeployMonitor.ViewModels
             if (parameter is ProjectInfo project && project.HasDeployBat)
             {
                 AddDeployLog($"[{project.Name}] 수동 배포 시작");
-                _runner.Enqueue(project);
+                _runner.Enqueue(project, "manual");
             }
         }
 
@@ -328,7 +401,23 @@ namespace DeployMonitor.ViewModels
                 {
                     Projects.Add(project);
                     AddWatchLog($"[{project.Name}] 새 프로젝트 추가됨");
+                    _ = _runner.RefreshProjectStatusFromDockerAsync(project);
                 }
+            });
+        }
+
+        /// <summary>시스템 사용량 갱신</summary>
+        private void OnUsageUpdated(double cpu, double mem, double gpu)
+        {
+            _rawCpu = cpu;
+            _rawMem = mem;
+            _rawGpu = gpu;
+
+            Application.Current?.Dispatcher.BeginInvoke(() =>
+            {
+                CpuUsage = $"CPU: {cpu:F0}%";
+                MemUsage = $"MEM: {mem:F0}%";
+                GpuUsage = gpu >= 0 ? $"GPU: {gpu:F0}%" : "GPU: N/A";
             });
         }
 
@@ -423,6 +512,168 @@ namespace DeployMonitor.ViewModels
             }
         }
 
+        // --- Deploy History ---
+
+        /// <summary>배포 이력 저장소 (웹서버 시작 시 설정됨)</summary>
+        public DeployHistoryStore? DeployHistoryStore { get; set; }
+
+        private void OnDeployHistory(string projectName, bool success, string? commitHash,
+            DateTime startedAt, string? logSummary, string triggerType)
+        {
+            try
+            {
+                DeployHistoryStore?.Save(projectName, commitHash,
+                    success ? "Success" : "Error",
+                    startedAt, DateTime.Now, logSummary, triggerType);
+            }
+            catch { }
+        }
+
+        // --- Web API Methods ---
+
+        /// <summary>프로젝트 스냅샷 (API용)</summary>
+        public List<object> GetProjectsSnapshot()
+        {
+            var result = new List<object>();
+            Application.Current?.Dispatcher.Invoke(() =>
+            {
+                foreach (var p in Projects)
+                {
+                    result.Add(new
+                    {
+                        name = p.Name,
+                        status = (int)p.Status,
+                        statusDisplay = p.StatusDisplay,
+                        hasDeployBat = p.HasDeployBat,
+                        branch = p.Branch,
+                        lastCommitHash = p.LastCommitHash,
+                        lastCommitDetectedTime = p.LastCommitDetectedTime,
+                        lastDeployTime = p.LastDeployTime,
+                        lastMessage = p.LastMessage
+                    });
+                }
+            });
+            return result;
+        }
+
+        /// <summary>시스템 메트릭 (API용)</summary>
+        public (double cpu, double mem, double gpu) GetSystemMetrics()
+        {
+            return (_rawCpu, _rawMem, _rawGpu);
+        }
+
+        /// <summary>감시 로그 스냅샷 (API용)</summary>
+        public List<string> GetWatchLogSnapshot(int last = 100)
+        {
+            lock (_watchLogsLock)
+            {
+                return WatchLogs.TakeLast(last).ToList();
+            }
+        }
+
+        /// <summary>배포 로그 스냅샷 (API용)</summary>
+        public List<string> GetDeployLogSnapshot(int last = 100)
+        {
+            lock (_deployLogsLock)
+            {
+                return DeployLogs.TakeLast(last).ToList();
+            }
+        }
+
+        /// <summary>프로젝트 조회 (API용)</summary>
+        public ProjectInfo? GetProject(string projectName)
+        {
+            ProjectInfo? project = null;
+            Application.Current?.Dispatcher.Invoke(() =>
+            {
+                project = Projects.FirstOrDefault(p =>
+                    string.Equals(p.Name, projectName, StringComparison.OrdinalIgnoreCase));
+            });
+            return project;
+        }
+
+        /// <summary>프로젝트별 배포 로그 (API용)</summary>
+        public string? GetProjectLog(string projectName)
+        {
+            string? log = null;
+            Application.Current?.Dispatcher.Invoke(() =>
+            {
+                var project = Projects.FirstOrDefault(p => p.Name == projectName);
+                log = project?.LastDeploymentLog;
+            });
+            return log;
+        }
+
+        /// <summary>감시 시작 (API용)</summary>
+        public Task ApiStartWatch()
+        {
+            var tcs = new TaskCompletionSource();
+            Application.Current?.Dispatcher.BeginInvoke(() =>
+            {
+                if (!IsWatching) StartWatch();
+                tcs.TrySetResult();
+            });
+            return tcs.Task;
+        }
+
+        /// <summary>감시 중지 (API용)</summary>
+        public Task ApiStopWatch()
+        {
+            var tcs = new TaskCompletionSource();
+            Application.Current?.Dispatcher.BeginInvoke(() =>
+            {
+                if (IsWatching) StopWatch();
+                tcs.TrySetResult();
+            });
+            return tcs.Task;
+        }
+
+        /// <summary>수동 배포 (API용)</summary>
+        public Task<bool> ApiManualDeploy(string projectName)
+        {
+            var tcs = new TaskCompletionSource<bool>();
+            Application.Current?.Dispatcher.BeginInvoke(() =>
+            {
+                var project = Projects.FirstOrDefault(p => p.Name == projectName);
+                if (project != null && project.HasDeployBat)
+                {
+                    AddDeployLog($"[{project.Name}] 수동 배포 시작 (웹)");
+                    _runner.Enqueue(project, "manual");
+                    tcs.TrySetResult(true);
+                }
+                else
+                {
+                    tcs.TrySetResult(false);
+                }
+            });
+            return tcs.Task;
+        }
+
+        /// <summary>프로젝트 새로고침 (API용)</summary>
+        public Task ApiScanProjects()
+        {
+            var tcs = new TaskCompletionSource();
+            Application.Current?.Dispatcher.BeginInvoke(() =>
+            {
+                ScanProjects();
+                tcs.TrySetResult();
+            });
+            return tcs.Task;
+        }
+
+        /// <summary>설정 변경 (API용)</summary>
+        public void ApiUpdateSettings(string? repoFolder, string? deployFolder, int? intervalSeconds, string? defaultBranch, string? globalExitedOkContainers)
+        {
+            Application.Current?.Dispatcher.Invoke(() =>
+            {
+                if (repoFolder != null) RepoFolder = repoFolder;
+                if (deployFolder != null) DeployFolder = deployFolder;
+                if (intervalSeconds.HasValue) IntervalSeconds = intervalSeconds.Value;
+                if (defaultBranch != null) DefaultBranch = defaultBranch;
+                if (globalExitedOkContainers != null) GlobalExitedOkContainers = globalExitedOkContainers;
+            });
+        }
+
         // --- INotifyPropertyChanged ---
 
         public event PropertyChangedEventHandler? PropertyChanged;
@@ -442,6 +693,7 @@ namespace DeployMonitor.ViewModels
 
         public void Dispose()
         {
+            _monitor.Dispose();
             _watcher.Dispose();
             _runner.Dispose();
         }

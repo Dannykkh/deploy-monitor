@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using DeployMonitor.Models;
 using DeployMonitor.ViewModels;
+using DeployMonitor.Views;
 
 namespace DeployMonitor
 {
@@ -12,10 +13,10 @@ namespace DeployMonitor
         private readonly MainViewModel _viewModel;
         private bool _isExiting;
 
-        public MainWindow()
+        public MainWindow(MainViewModel viewModel)
         {
             InitializeComponent();
-            _viewModel = new MainViewModel();
+            _viewModel = viewModel;
             DataContext = _viewModel;
 
             // 로그 자동 스크롤
@@ -68,11 +69,10 @@ namespace DeployMonitor
             }
         }
 
-        /// <summary>실제 종료 (트레이 메뉴에서 호출)</summary>
-        public void ExitApplication()
+        /// <summary>종료 준비 (App에서 호출, Dispose는 App이 관리)</summary>
+        public void PrepareExit()
         {
             _isExiting = true;
-            _viewModel.Dispose();
             Close();
         }
 
@@ -103,6 +103,25 @@ namespace DeployMonitor
                 }
                 catch { }
             });
+        }
+
+        /// <summary>계정 버튼 클릭</summary>
+        private void AccountButton_Click(object sender, RoutedEventArgs e)
+        {
+            var win = new AccountWindow { Owner = this };
+            win.ShowDialog();
+        }
+
+        /// <summary>Whitelist 버튼 클릭</summary>
+        private void WhitelistButton_Click(object sender, RoutedEventArgs e)
+        {
+            var win = new WhitelistWindow(
+                _viewModel.GlobalExitedOkContainers,
+                value => _viewModel.GlobalExitedOkContainers = value)
+            {
+                Owner = this
+            };
+            win.ShowDialog();
         }
 
         /// <summary>프로젝트 행 더블클릭 시 상세 로그 표시</summary>

@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deploy Monitor</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-left">
+            <h1>Deploy Monitor</h1>
+            <span id="watchStatus" class="badge badge-idle">-- 대기</span>
+        </div>
+        <div class="header-right">
+            <button id="btnSettings" class="btn btn-sm" onclick="toggleSettings()">설정</button>
+            <button id="btnChangePw" class="btn btn-sm" onclick="showChangePassword()">비밀번호</button>
+            <span id="currentUser" class="user-label"></span>
+            <button class="btn btn-sm btn-danger" onclick="logout()">로그아웃</button>
+        </div>
+    </header>
+
+    <!-- System Metrics -->
+    <section class="metrics-bar">
+        <div class="metric">
+            <span class="metric-label">CPU</span>
+            <div class="metric-bar"><div id="cpuBar" class="metric-fill"></div></div>
+            <span id="cpuValue" class="metric-value">--%</span>
+        </div>
+        <div class="metric">
+            <span class="metric-label">MEM</span>
+            <div class="metric-bar"><div id="memBar" class="metric-fill"></div></div>
+            <span id="memValue" class="metric-value">--%</span>
+        </div>
+        <div class="metric">
+            <span class="metric-label">GPU</span>
+            <div class="metric-bar"><div id="gpuBar" class="metric-fill"></div></div>
+            <span id="gpuValue" class="metric-value">--%</span>
+        </div>
+    </section>
+
+    <!-- Watch Controls -->
+    <section class="controls-bar">
+        <button id="btnWatch" class="btn btn-primary" onclick="toggleWatch()">● 감시 시작</button>
+        <button class="btn" onclick="refreshProjects()">새로고침</button>
+    </section>
+
+    <!-- Projects Table -->
+    <section class="projects-section">
+        <table class="projects-table">
+            <thead>
+                <tr>
+                    <th>프로젝트</th>
+                    <th>상태</th>
+                    <th>커밋감지</th>
+                    <th>마지막 배포</th>
+                    <th>메시지</th>
+                    <th>액션</th>
+                </tr>
+            </thead>
+            <tbody id="projectsBody">
+                <tr><td colspan="6" class="empty-message">로딩 중...</td></tr>
+            </tbody>
+        </table>
+    </section>
+
+    <!-- Logs -->
+    <section class="logs-section">
+        <div class="log-tabs">
+            <button class="log-tab active" data-tab="watchLog" onclick="switchLogTab(this)">감시 로그</button>
+            <button class="log-tab" data-tab="deployLog" onclick="switchLogTab(this)">배포 로그</button>
+            <button class="log-tab" data-tab="history" onclick="switchLogTab(this)">배포 이력</button>
+        </div>
+        <div id="watchLog" class="log-panel active">
+            <pre id="watchLogContent" class="log-content"></pre>
+        </div>
+        <div id="deployLog" class="log-panel">
+            <pre id="deployLogContent" class="log-content"></pre>
+        </div>
+        <div id="history" class="log-panel">
+            <div id="historyContent" class="history-content"></div>
+        </div>
+    </section>
+
+    <!-- Settings Panel (hidden) -->
+    <section id="settingsPanel" class="settings-panel" style="display:none;">
+        <h3>설정</h3>
+        <div class="form-group">
+            <label>저장소 폴더</label>
+            <input type="text" id="settRepoFolder">
+        </div>
+        <div class="form-group">
+            <label>배포 폴더</label>
+            <input type="text" id="settDeployFolder">
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>감시 주기(초)</label>
+                <input type="number" id="settInterval" min="5" max="300">
+            </div>
+            <div class="form-group">
+                <label>기본 브랜치</label>
+                <input type="text" id="settBranch">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>도커 Exited(0) 화이트리스트 (전역)</label>
+            <div class="whitelist-input-row">
+                <input type="text" id="settWhitelistInput" placeholder="키워드 입력">
+                <button class="btn btn-sm" onclick="addWhitelistItem()">Add</button>
+            </div>
+            <div id="whitelistItems" class="whitelist-list"></div>
+            <div class="dim" style="margin-top:4px;">비어 있으면 모든 Exited(0) 컨테이너를 허용합니다.</div>
+        </div>
+        <div class="form-actions">
+            <button class="btn btn-primary" onclick="saveSettings()">저장</button>
+            <button class="btn" onclick="toggleSettings()">닫기</button>
+        </div>
+
+        <hr style="border:none;border-top:1px solid var(--border);margin:16px 0;">
+
+        <h3 style="margin-bottom:8px;">웹 계정 설정</h3>
+        <div class="form-row">
+            <div class="form-group">
+                <label>새 아이디 (선택)</label>
+                <input type="text" id="settAccountUsername" placeholder="예: admin2">
+            </div>
+            <div class="form-group">
+                <label>새 비밀번호 (선택)</label>
+                <input type="password" id="settAccountNewPassword" placeholder="4자 이상">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>현재 비밀번호 (필수)</label>
+            <input type="password" id="settAccountOldPassword">
+        </div>
+        <div id="settAccountError" class="error-message" style="display:none;"></div>
+        <div class="form-actions">
+            <button class="btn btn-primary" onclick="saveAccountSettings()">계정 변경</button>
+        </div>
+    </section>
+
+    <!-- Change Password Modal -->
+    <div id="changePwModal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <h3>비밀번호 변경</h3>
+            <div class="form-group">
+                <label>현재 비밀번호</label>
+                <input type="password" id="oldPassword">
+            </div>
+            <div class="form-group">
+                <label>새 비밀번호</label>
+                <input type="password" id="newPassword">
+            </div>
+            <div id="changePwError" class="error-message" style="display:none;"></div>
+            <div class="form-actions">
+                <button class="btn btn-primary" onclick="changePassword()">변경</button>
+                <button class="btn" onclick="hideChangePassword()">취소</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Deploy Log Modal -->
+    <div id="deployLogModal" class="modal" style="display:none;">
+        <div class="modal-content modal-lg">
+            <div class="modal-header">
+                <h3 id="deployLogTitle">배포 로그</h3>
+                <button class="btn-close" onclick="hideDeployLog()">&times;</button>
+            </div>
+            <pre id="deployLogDetail" class="log-content"></pre>
+        </div>
+    </div>
+
+    <!-- Delete Container Confirm Modal -->
+    <div id="deleteContainerModal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <h3>Delete Container</h3>
+            <p id="deleteContainerMsg" style="margin-bottom:12px;"></p>
+            <div class="form-group">
+                <label>Type <strong>DELETE</strong> to confirm:</label>
+                <input type="text" id="deleteConfirmInput" oninput="onDeleteConfirmInput()" autocomplete="off">
+            </div>
+            <div id="deleteContainerError" class="error-message" style="display:none;"></div>
+            <div class="form-actions">
+                <button id="deleteConfirmBtn" class="btn btn-danger" onclick="confirmDeleteContainer()" disabled>Confirm</button>
+                <button class="btn" onclick="cancelDeleteContainer()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Docker Status Modal -->
+    <div id="dockerModal" class="modal" style="display:none;">
+        <div class="modal-content modal-xl">
+            <div class="modal-header">
+                <h3 id="dockerModalTitle">Docker 상태</h3>
+                <button class="btn-close" onclick="hideDockerModal()">&times;</button>
+            </div>
+            <div id="dockerSummary" class="dim"></div>
+            <div class="docker-layout">
+                <div class="docker-list-pane">
+                    <table class="docker-table">
+                        <thead>
+                            <tr>
+                                <th>컨테이너</th>
+                                <th>판정</th>
+                                <th>State</th>
+                                <th>Status</th>
+                                <th>액션</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dockerContainersBody">
+                            <tr><td colspan="5" class="empty-message">로딩 중...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="docker-log-pane">
+                    <div id="dockerLogTitle" class="docker-log-title">컨테이너 로그</div>
+                    <pre id="dockerContainerLog" class="log-content docker-log-content">컨테이너를 선택하면 로그를 표시합니다.</pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/api.js"></script>
+    <script src="/js/dashboard.js"></script>
+</body>
+</html>

@@ -1,14 +1,22 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Threading.Tasks;
 using System.Windows;
+using DeployMonitor.Models;
 using Hardcodet.Wpf.TaskbarNotification;
+using DeployMonitor.ViewModels;
+using DeployMonitor.Web;
 
 namespace DeployMonitor
 {
     public partial class App : Application
     {
         private TaskbarIcon? _trayIcon;
+        private MainViewModel? _mainViewModel;
+        private WebServerHost? _webServer;
 
         protected override void OnStartup(StartupEventArgs e)
         {
@@ -34,7 +42,26 @@ namespace DeployMonitor
                 args.SetObserved();
             };
 
+            // MainViewModel 생성 (앱 전체에서 공유)
+            _mainViewModel = new MainViewModel();
+
+            // 웹 대시보드 서버 시작 (백그라운드)
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var settings = AppSettings.Load();
+                    _webServer = new WebServerHost();
+                    await _webServer.StartAsync(_mainViewModel, settings.WebPort, settings.WebListenAnyIP);
+                }
+                catch (Exception ex)
+                {
+                    LogCrash("WebServer", ex);
+                }
+            });
+
             InitializeTrayIcon();
+            ShowMainWindow();
         }
 
         private static void LogCrash(string source, Exception ex)
@@ -87,7 +114,14 @@ namespace DeployMonitor
             watchItem.Click += (_, _) =>
             {
                 var mainWindow = MainWindow as MainWindow;
-                mainWindow?.ToggleWatch();
+                if (mainWindow != null)
+                {
+                    mainWindow.ToggleWatch();
+                    return;
+                }
+
+                if (_mainViewModel?.StartStopCommand.CanExecute(null) == true)
+                    _mainViewModel.StartStopCommand.Execute(null);
             };
             menu.Items.Add(watchItem);
 
@@ -110,7 +144,7 @@ namespace DeployMonitor
         {
             if (MainWindow == null)
             {
-                MainWindow = new MainWindow();
+                MainWindow = new MainWindow(_mainViewModel!);
             }
             MainWindow.Show();
             MainWindow.WindowState = WindowState.Normal;
@@ -125,11 +159,18 @@ namespace DeployMonitor
         }
 
         /// <summary>앱 종료</summary>
-        private void ExitApplication()
+        private async void ExitApplication()
         {
-            var mainWindow = MainWindow as MainWindow;
-            mainWindow?.ExitApplication();
+            // 웹 서버 종료
+            if (_webServer != null)
+            {
+                try { await _webServer.StopAsync(); } catch { }
+            }
 
+            var mainWindow = MainWindow as MainWindow;
+            mainWindow?.PrepareExit();
+
+            _mainViewModel?.Dispose();
             _trayIcon?.Dispose();
             _trayIcon = null;
 
@@ -146,28 +187,113 @@ namespace DeployMonitor
         private static void ConfigureGitSafeDirectory()
         {
             // 백그라운드에서 실행 (UI 블로킹 방지)
-            System.Threading.Tasks.Task.Run(() =>
+            Task.Run(() =>
             {
                 try
                 {
-                    var psi = new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = "git",
-                        Arguments = "config --global --add safe.directory \"*\"",
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true
-                    };
+                    var settings = AppSettings.Load();
+                    var configured = GetConfiguredSafeDirectories();
 
-                    using var process = System.Diagnostics.Process.Start(psi);
-                    process?.WaitForExit(5000);
+                    // 기존 와일드카드 설정 제거 (과도한 권한)
+                    if (configured.Contains("*"))
+                    {
+                        RunGit("config --global --unset-all safe.directory \"*\"");
+                        configured.Remove("*");
+                    }
+
+                    var candidates = CollectSafeDirectories(settings);
+                    if (candidates.Count == 0) return;
+
+                    foreach (var path in candidates)
+                    {
+                        if (configured.Contains(path)) continue;
+                        RunGit($"config --global --add safe.directory \"{path}\"");
+                    }
                 }
                 catch
                 {
                     // Git이 설치되지 않은 경우 무시
                 }
             });
+        }
+
+        private static HashSet<string> CollectSafeDirectories(AppSettings settings)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            AddDirectoryIfExists(result, settings.RepositoryFolder);
+            AddDirectoryIfExists(result, settings.DeployFolder);
+            AddFirstLevelSubdirectories(result, settings.RepositoryFolder);
+            AddFirstLevelSubdirectories(result, settings.DeployFolder);
+            return result;
+        }
+
+        private static void AddFirstLevelSubdirectories(HashSet<string> result, string rootPath)
+        {
+            if (string.IsNullOrWhiteSpace(rootPath)) return;
+
+            try
+            {
+                var fullRoot = Path.GetFullPath(rootPath);
+                if (!Directory.Exists(fullRoot)) return;
+
+                foreach (var dir in Directory.GetDirectories(fullRoot))
+                    AddDirectoryIfExists(result, dir);
+            }
+            catch
+            {
+                // 디렉터리 열거 실패는 무시
+            }
+        }
+
+        private static void AddDirectoryIfExists(HashSet<string> result, string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return;
+
+            try
+            {
+                var fullPath = Path.GetFullPath(path);
+                if (Directory.Exists(fullPath))
+                    result.Add(fullPath);
+            }
+            catch
+            {
+                // 경로 정규화 실패는 무시
+            }
+        }
+
+        private static HashSet<string> GetConfiguredSafeDirectories()
+        {
+            var configured = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var (exitCode, output, _) = RunGit("config --global --get-all safe.directory");
+            if (exitCode != 0 || string.IsNullOrWhiteSpace(output))
+                return configured;
+
+            foreach (var line in output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                configured.Add(line.Trim());
+
+            return configured;
+        }
+
+        private static (int exitCode, string output, string error) RunGit(string arguments)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = arguments,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+
+            using var process = Process.Start(psi);
+            if (process == null)
+                return (-1, "", "Failed to start git process.");
+
+            var output = process.StandardOutput.ReadToEnd();
+            var error = process.StandardError.ReadToEnd();
+            process.WaitForExit(5000);
+            return (process.ExitCode, output, error);
         }
     }
 }
