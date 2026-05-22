@@ -147,8 +147,15 @@ namespace DeployMonitor.Services
         /// <summary>파일 변경 이벤트 핸들러</summary>
         private void OnFileChanged(ProjectInfo project, string changedPath)
         {
-            var branchFile = Path.GetFileName(changedPath);
-            if (branchFile == project.Branch || changedPath.Contains("packed-refs"))
+            var normalizedPath = changedPath.Replace('\\', '/');
+            var normalizedBranch = project.Branch.Replace('\\', '/').Trim('/');
+
+            // branch가 feature/x 형태여도 refs/heads/feature/x 변경을 즉시 감지
+            var isBranchRefChanged =
+                normalizedPath.EndsWith($"/refs/heads/{normalizedBranch}", StringComparison.OrdinalIgnoreCase) ||
+                normalizedPath.EndsWith($"/{normalizedBranch}", StringComparison.OrdinalIgnoreCase);
+
+            if (isBranchRefChanged || normalizedPath.EndsWith("/packed-refs", StringComparison.OrdinalIgnoreCase))
             {
                 // 파일 쓰기 완료 대기 (짧은 지연)
                 Thread.Sleep(200);
@@ -204,6 +211,8 @@ namespace DeployMonitor.Services
                     // 새 프로젝트 발견
                     var deployPath = Path.Combine(_deployFolder, projectName);
                     var commitHash = RepoScanner.ReadCommitHash(dir, _defaultBranch);
+                    var (containerPrefix, deployTriggers, exitedOkContainers) =
+                        RepoScanner.ReadDeployMetadata(dir, _defaultBranch, projectName);
 
                     var newProject = new ProjectInfo
                     {
@@ -213,6 +222,9 @@ namespace DeployMonitor.Services
                         HasDeployBat = true,
                         Branch = _defaultBranch,
                         LastCommitHash = commitHash,
+                        ContainerPrefix = containerPrefix,
+                        DeployTriggers = deployTriggers,
+                        ExitedOkContainers = exitedOkContainers,
                         Status = ProjectStatus.Idle
                     };
 

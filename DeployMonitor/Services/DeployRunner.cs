@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -25,12 +26,23 @@ namespace DeployMonitor.Services
         /// <summary>배포 완료 이벤트 (프로젝트명, 성공여부)</summary>
         public event Action<string, bool>? DeployCompleted;
 
+        /// <summary>배포 이력 기록 이벤트 (프로젝트명, 성공여부, 커밋해시, 시작시각, 로그요약, 트리거타입)</summary>
+        public event Action<string, bool, string?, DateTime, string?, string>? DeployHistoryEvent;
+
+        private readonly ConcurrentDictionary<string, string> _triggerTypes = new();
+
+        /// <summary>
+        /// Exited(0) 허용 컨테이너 전역 화이트리스트(공백/쉼표/세미콜론 구분).
+        /// </summary>
+        public string GlobalExitedOkContainers { get; set; } = "";
+
         /// <summary>배포 큐에 추가</summary>
-        public void Enqueue(ProjectInfo project)
+        public void Enqueue(ProjectInfo project, string triggerType = "auto")
         {
             // 이미 배포 중이면 무시
             if (project.Status == ProjectStatus.Deploying) return;
 
+            _triggerTypes[project.Name] = triggerType;
             _queue.Enqueue(project);
             _ = ProcessQueueAsync();
         }
@@ -68,6 +80,9 @@ namespace DeployMonitor.Services
         /// <summary>단일 프로젝트 배포 실행</summary>
         private async Task RunDeployAsync(ProjectInfo project)
         {
+            var startedAt = DateTime.Now;
+            var triggerType = _triggerTypes.TryRemove(project.Name, out var tt) ? tt : "auto";
+
             // 배포별 로그 수집용
             var deployLog = new System.Text.StringBuilder();
             void Log(string msg)
@@ -86,6 +101,7 @@ namespace DeployMonitor.Services
                     project.LastMessage = "deploy 경로 없음";
                     project.LastDeploymentLog = deployLog.ToString();
                 });
+                FireHistoryEvent(project, false, startedAt, deployLog, triggerType);
                 return;
             }
 
@@ -102,6 +118,7 @@ namespace DeployMonitor.Services
             if (!syncResult)
             {
                 UpdateUI(() => project.LastDeploymentLog = deployLog.ToString());
+                FireHistoryEvent(project, false, startedAt, deployLog, triggerType);
                 DeployCompleted?.Invoke(project.Name, false);
                 return;
             }
@@ -122,6 +139,7 @@ namespace DeployMonitor.Services
                         project.LastMessage = "변경 없음 - 빌드 생략";
                         project.LastDeploymentLog = deployLog.ToString();
                     });
+                    // Skip은 이력에 기록하지 않음
                     DeployCompleted?.Invoke(project.Name, true);
                     return;
                 }
@@ -140,6 +158,7 @@ namespace DeployMonitor.Services
                     WorkingDirectory = project.DeployPath,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
+                    RedirectStandardInput = true,
                     UseShellExecute = false,
                     CreateNoWindow = true
                 };
@@ -165,23 +184,25 @@ namespace DeployMonitor.Services
                 };
 
                 process.Start();
+                process.StandardInput.Close(); // EOF → unblock pause/choice commands
                 process.BeginOutputReadLine();
                 process.BeginErrorReadLine();
 
-                // 최대 10분 대기
-                var completed = await Task.Run(() => process.WaitForExit(600_000));
+                // 최대 30분 대기 (대용량 빌드 + cache miss 대응)
+                var completed = await Task.Run(() => process.WaitForExit(1_800_000));
 
                 if (!completed)
                 {
                     try { process.Kill(entireProcessTree: true); } catch { }
-                    deployLog.AppendLine("[TIMEOUT] 배포 타임아웃 (10분 초과)");
+                    deployLog.AppendLine("[TIMEOUT] 배포 타임아웃 (30분 초과)");
                     UpdateUI(() =>
                     {
                         project.Status = ProjectStatus.Error;
-                        project.LastMessage = "타임아웃 (10분 초과)";
+                        project.LastMessage = "타임아웃 (30분 초과)";
                         project.LastDeploymentLog = deployLog.ToString();
                     });
                     LogMessage?.Invoke($"[{project.Name}] 배포 타임아웃");
+                    FireHistoryEvent(project, false, startedAt, deployLog, triggerType);
                     DeployCompleted?.Invoke(project.Name, false);
                     return;
                 }
@@ -205,6 +226,7 @@ namespace DeployMonitor.Services
                             project.LastDeploymentLog = deployLog.ToString();
                         });
                         LogMessage?.Invoke($"[{project.Name}] 배포 완료 - {dockerStatus.Summary}");
+                        FireHistoryEvent(project, true, startedAt, deployLog, triggerType);
                         DeployCompleted?.Invoke(project.Name, true);
                     }
                     else
@@ -225,6 +247,7 @@ namespace DeployMonitor.Services
                             await ShowContainerLogsAsync(project.Name, dockerStatus.FailedContainer);
                         }
 
+                        FireHistoryEvent(project, false, startedAt, deployLog, triggerType);
                         DeployCompleted?.Invoke(project.Name, false);
                     }
                 }
@@ -239,6 +262,7 @@ namespace DeployMonitor.Services
                         project.LastDeploymentLog = deployLog.ToString();
                     });
                     LogMessage?.Invoke($"[{project.Name}] 배포 실패 (exit code {exitCode})");
+                    FireHistoryEvent(project, false, startedAt, deployLog, triggerType);
                     DeployCompleted?.Invoke(project.Name, false);
                 }
             }
@@ -252,6 +276,7 @@ namespace DeployMonitor.Services
                     project.LastDeploymentLog = deployLog.ToString();
                 });
                 LogMessage?.Invoke($"[{project.Name}] 실행 오류: {ex.Message}");
+                FireHistoryEvent(project, false, startedAt, deployLog, triggerType);
                 DeployCompleted?.Invoke(project.Name, false);
             }
         }
@@ -454,19 +479,67 @@ namespace DeployMonitor.Services
             }
         }
 
+        /// <summary>
+        /// 배포 없이 현재 Docker 상태를 기준으로 프로젝트 상태를 동기화한다.
+        /// </summary>
+        public async Task RefreshProjectStatusFromDockerAsync(ProjectInfo project)
+        {
+            if (project.Status == ProjectStatus.Deploying)
+                return;
+
+            UpdateUI(() =>
+            {
+                project.Status = ProjectStatus.Checking;
+                project.LastMessage = "Docker 상태 확인 중...";
+            });
+
+            var dockerStatus = await CheckDockerContainersAsync(project, noMatchIsSuccess: false, emitLog: false);
+
+            UpdateUI(() =>
+            {
+                if (dockerStatus.HasError)
+                {
+                    project.Status = ProjectStatus.Error;
+                    project.LastMessage = dockerStatus.Summary;
+                    return;
+                }
+
+                if (!dockerStatus.HasMatchedContainers)
+                {
+                    project.Status = ProjectStatus.Idle;
+                    project.LastMessage = "컨테이너 없음";
+                    return;
+                }
+
+                if (dockerStatus.AllRunning)
+                {
+                    project.Status = ProjectStatus.Success;
+                    project.LastMessage = dockerStatus.Summary;
+                }
+                else
+                {
+                    project.Status = ProjectStatus.Error;
+                    project.LastMessage = dockerStatus.Summary;
+                }
+            });
+        }
+
         /// <summary>Docker 컨테이너 상태 확인</summary>
-        private async Task<DockerStatusResult> CheckDockerContainersAsync(ProjectInfo project)
+        private async Task<DockerStatusResult> CheckDockerContainersAsync(
+            ProjectInfo project,
+            bool noMatchIsSuccess = true,
+            bool emitLog = true)
         {
             var result = new DockerStatusResult();
+            void Log(string message)
+            {
+                if (emitLog)
+                    LogMessage?.Invoke($"[{project.Name}] {message}");
+            }
 
             try
             {
-                // 컨테이너 접두사 (ContainerPrefix 우선, 없으면 Name 사용)
-                var prefix = !string.IsNullOrEmpty(project.ContainerPrefix)
-                    ? project.ContainerPrefix
-                    : project.Name;
-
-                // Docker 필터는 대소문자 구분하므로, 전체 조회 후 C#에서 필터링
+                // Docker 전체 컨테이너 조회
                 var psi = new ProcessStartInfo
                 {
                     FileName = "docker",
@@ -480,28 +553,66 @@ namespace DeployMonitor.Services
                 using var process = new Process { StartInfo = psi };
                 process.Start();
 
-                var output = await process.StandardOutput.ReadToEndAsync();
+                var outputTask = process.StandardOutput.ReadToEndAsync();
+                var errorTask = process.StandardError.ReadToEndAsync();
                 await process.WaitForExitAsync();
+                var output = await outputTask;
+                var error = await errorTask;
+
+                if (process.ExitCode != 0)
+                {
+                    var err = string.IsNullOrWhiteSpace(error)
+                        ? $"exit code {process.ExitCode}"
+                        : error.Trim();
+                    result.HasError = true;
+                    result.AllRunning = false;
+                    result.Summary = $"Docker 확인 실패: {err}";
+                    return result;
+                }
 
                 if (string.IsNullOrWhiteSpace(output))
                 {
-                    result.Summary = "컨테이너 없음";
+                    result.HasMatchedContainers = false;
+                    result.AllRunning = noMatchIsSuccess;
+                    result.Summary = noMatchIsSuccess ? "배포 완료" : "컨테이너 없음";
                     return result;
                 }
 
-                // 대소문자 무시하고 프로젝트명 포함된 컨테이너만 필터링
                 var allLines = output.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-                var lines = allLines.Where(line =>
-                    line.Split('|')[0].Contains(prefix, StringComparison.OrdinalIgnoreCase)).ToArray();
+
+                // 여러 접두사 후보로 컨테이너 매칭 시도
+                var prefixes = BuildPrefixCandidates(project);
+                string[] lines = Array.Empty<string>();
+
+                foreach (var prefix in prefixes)
+                {
+                    if (string.IsNullOrEmpty(prefix)) continue;
+
+                    lines = allLines.Where(line =>
+                        line.Split('|')[0].Contains(prefix, StringComparison.OrdinalIgnoreCase)).ToArray();
+
+                    if (lines.Length > 0)
+                    {
+                        Log($"컨테이너 매칭: prefix=\"{prefix}\", {lines.Length}개");
+                        break;
+                    }
+                }
 
                 if (lines.Length == 0)
                 {
-                    result.Summary = "컨테이너 없음";
+                    Log($"컨테이너 매칭 없음 (시도: {string.Join(", ", prefixes)})");
+                    result.HasMatchedContainers = false;
+                    result.AllRunning = noMatchIsSuccess;
+                    result.Summary = noMatchIsSuccess ? "배포 완료" : "컨테이너 없음";
                     return result;
                 }
 
+                result.HasMatchedContainers = true;
                 var running = 0;
                 var total = 0;
+                var toleratedStopped = 0;
+                var exitedAllowedKeywords = ParseExitedAllowedKeywords(
+                    $"{GlobalExitedOkContainers} {project.ExitedOkContainers}");
 
                 foreach (var line in lines)
                 {
@@ -511,32 +622,55 @@ namespace DeployMonitor.Services
                         total++;
                         var name = parts[0].Trim();
                         var status = parts[1].Trim();
-                        var state = parts[2].Trim().ToLower();
+                        var state = parts[2].Trim().ToLowerInvariant();
 
-                        if (state == "running")
+                        var whitelisted = IsWhitelistedContainer(name, exitedAllowedKeywords);
+
+                        // 화이트리스트 매칭: 키워드에 해당하면 상태와 무관하게 허용
+                        if (whitelisted && state != "running")
+                        {
+                            toleratedStopped++;
+                            Log($"{name}: {state} - 화이트리스트 허용");
+                        }
+                        else if (state == "running")
                         {
                             running++;
-                            // health 상태 확인
-                            if (status.Contains("unhealthy"))
-                            {
-                                result.FailedContainer = name;
-                                LogMessage?.Invoke($"[{project.Name}] {name}: unhealthy");
-                            }
+                            // unhealthy는 경고로만 표시, running이면 정상으로 간주
+                            if (status.Contains("unhealthy", StringComparison.OrdinalIgnoreCase))
+                                Log($"{name}: running (unhealthy 경고)");
                             else
-                            {
-                                LogMessage?.Invoke($"[{project.Name}] {name}: running");
-                            }
+                                Log($"{name}: running");
+                        }
+                        else if (IsExpectedStoppedContainer(name, status, state, exitedAllowedKeywords))
+                        {
+                            toleratedStopped++;
+                            Log($"{name}: exited(0) - 정상 종료로 허용");
                         }
                         else
                         {
                             result.FailedContainer ??= name;
-                            LogMessage?.Invoke($"[{project.Name}] {name}: {state}");
+                            Log($"{name}: {state} - 오류");
                         }
                     }
                 }
 
-                result.AllRunning = (running == total && total > 0 && string.IsNullOrEmpty(result.FailedContainer));
-                result.Summary = $"컨테이너 {running}/{total} 실행중";
+                if (total == 0)
+                {
+                    result.HasMatchedContainers = false;
+                    result.AllRunning = noMatchIsSuccess;
+                    result.Summary = noMatchIsSuccess ? "배포 완료" : "컨테이너 없음";
+                    return result;
+                }
+
+                result.AllRunning =
+                    (running + toleratedStopped == total &&
+                     total > 0 &&
+                     running > 0 &&
+                     string.IsNullOrEmpty(result.FailedContainer));
+
+                result.Summary = toleratedStopped > 0
+                    ? $"컨테이너 {running}/{total} 실행중 ({toleratedStopped}개 허용)"
+                    : $"컨테이너 {running}/{total} 실행중";
 
                 if (!result.AllRunning && !string.IsNullOrEmpty(result.FailedContainer))
                 {
@@ -545,11 +679,118 @@ namespace DeployMonitor.Services
             }
             catch (Exception ex)
             {
+                result.HasError = true;
                 result.Summary = $"Docker 확인 실패: {ex.Message}";
-                LogMessage?.Invoke($"[{project.Name}] Docker 상태 확인 오류: {ex.Message}");
+                Log($"Docker 상태 확인 오류: {ex.Message}");
             }
 
             return result;
+        }
+
+        /// <summary>화이트리스트 키워드에 매칭되는 컨테이너인지 판별 (상태 무관)</summary>
+        private static bool IsWhitelistedContainer(string containerName, IReadOnlyCollection<string> allowedKeywords)
+        {
+            if (allowedKeywords.Count == 0)
+                return false;
+            var name = containerName.ToLowerInvariant();
+            return allowedKeywords.Any(k => name.Contains(k, StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
+        /// 종료(Exited 0) 상태가 정상일 수 있는 스케줄성 컨테이너인지 판별
+        /// </summary>
+        private static bool IsExpectedStoppedContainer(
+            string containerName,
+            string status,
+            string state,
+            IReadOnlyCollection<string> allowedKeywords)
+        {
+            if (!string.Equals(state, "exited", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            if (!status.Contains("Exited (0)", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            // 기본 동작: EXITED_OK_CONTAINERS가 없으면 Exited(0) 전체를 정상 종료로 허용.
+            // 프로젝트별로 엄격하게 제한하고 싶으면 EXITED_OK_CONTAINERS를 설정한다.
+            if (allowedKeywords.Count == 0)
+                return true;
+
+            var name = containerName.ToLowerInvariant();
+            return allowedKeywords.Any(k => name.Contains(k, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static List<string> ParseExitedAllowedKeywords(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+                return new List<string>();
+
+            return raw
+                .Split(new[] { ' ', ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim())
+                .Where(x => !string.IsNullOrEmpty(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        /// <summary>컨테이너 접두사 후보 목록 생성 (우선순위 순)</summary>
+        private List<string> BuildPrefixCandidates(ProjectInfo project)
+        {
+            var candidates = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // 1. ContainerPrefix (deploy.bat의 PROJECT_NAME)
+            var cp = project.ContainerPrefix;
+            if (!string.IsNullOrEmpty(cp) && seen.Add(cp))
+                candidates.Add(cp);
+
+            // 2. project.Name (bare repo 폴더명)
+            if (!string.IsNullOrEmpty(project.Name) && seen.Add(project.Name))
+                candidates.Add(project.Name);
+
+            // 3. 배포 디렉토리명 (docker-compose 기본 프로젝트명)
+            if (!string.IsNullOrEmpty(project.DeployPath))
+            {
+                var dirName = Path.GetFileName(project.DeployPath);
+                if (!string.IsNullOrEmpty(dirName) && seen.Add(dirName))
+                    candidates.Add(dirName);
+            }
+
+            // 4. docker-compose.yml의 name: 필드
+            if (!string.IsNullOrEmpty(project.DeployPath))
+            {
+                var composeName = ReadComposeProjectName(project.DeployPath);
+                if (!string.IsNullOrEmpty(composeName) && seen.Add(composeName))
+                    candidates.Add(composeName);
+            }
+
+            return candidates;
+        }
+
+        /// <summary>docker-compose 파일에서 프로젝트명 읽기</summary>
+        private static string? ReadComposeProjectName(string deployPath)
+        {
+            var composeFiles = new[] { "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml" };
+            foreach (var file in composeFiles)
+            {
+                var path = Path.Combine(deployPath, file);
+                if (!File.Exists(path)) continue;
+                try
+                {
+                    foreach (var line in File.ReadLines(path))
+                    {
+                        // 루트 레벨 name: 필드 (들여쓰기 없음)
+                        if (line.StartsWith("name:"))
+                        {
+                            var value = line[5..].Trim().Trim('"', '\'');
+                            if (!string.IsNullOrEmpty(value))
+                                return value;
+                        }
+                    }
+                }
+                catch { /* compose 파일 읽기 실패 무시 */ }
+            }
+            return null;
         }
 
         /// <summary>실패한 컨테이너 로그 조회</summary>
@@ -592,8 +833,25 @@ namespace DeployMonitor.Services
         private class DockerStatusResult
         {
             public bool AllRunning { get; set; }
+            public bool HasMatchedContainers { get; set; }
+            public bool HasError { get; set; }
             public string Summary { get; set; } = "";
             public string? FailedContainer { get; set; }
+        }
+
+        /// <summary>배포 이력 이벤트 발행</summary>
+        private void FireHistoryEvent(ProjectInfo project, bool success,
+            DateTime startedAt, System.Text.StringBuilder deployLog, string triggerType)
+        {
+            try
+            {
+                var logSummary = deployLog.ToString();
+                if (logSummary.Length > 2000)
+                    logSummary = "...\n" + logSummary[^2000..];
+                DeployHistoryEvent?.Invoke(project.Name, success, project.LastCommitHash,
+                    startedAt, logSummary, triggerType);
+            }
+            catch { }
         }
 
         public void Dispose()

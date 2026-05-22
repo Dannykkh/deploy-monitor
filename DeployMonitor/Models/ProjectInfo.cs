@@ -34,6 +34,7 @@ namespace DeployMonitor.Models
         private string _lastDeploymentLog = "";
         private string _containerPrefix = "";
         private string _deployTriggers = "";
+        private string _exitedOkContainers = "";
         private string _previousCommitHash = "";
 
         /// <summary>프로젝트명 (폴더명에서 .git 제거)</summary>
@@ -122,6 +123,16 @@ namespace DeployMonitor.Models
         {
             get => _deployTriggers;
             set => SetField(ref _deployTriggers, value);
+        }
+
+        /// <summary>
+        /// 정상 종료 허용 컨테이너 키워드(공백/쉼표 구분, deploy.bat의 EXITED_OK_CONTAINERS).
+        /// 예: "db-backup backup-job"
+        /// </summary>
+        public string ExitedOkContainers
+        {
+            get => _exitedOkContainers;
+            set => SetField(ref _exitedOkContainers, value);
         }
 
         /// <summary>이전 커밋 해시 (선택적 배포 판단용, CommitWatcher에서 설정)</summary>

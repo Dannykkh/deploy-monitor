@@ -65,19 +65,16 @@ namespace DeployMonitor.Services
 
                 DebugLog?.Invoke($"[DEBUG] [{projectName}] deploy.bat 발견: {foundPath}");
 
-                // deploy.bat에서 Docker 컨테이너 접두사 추출
-                var containerPrefix = "";
-                var deployTriggers = "";
-                if (TryReadDeployBatFromRepo(dir, defaultBranch, projectName, out var batContent, out _, DebugLog))
-                {
-                    containerPrefix = ExtractProjectName(batContent);
-                    if (!string.IsNullOrEmpty(containerPrefix))
-                        DebugLog?.Invoke($"[DEBUG] [{projectName}] PROJECT_NAME={containerPrefix}");
+                // deploy.bat 메타데이터 추출
+                var (containerPrefix, deployTriggers, exitedOkContainers) =
+                    ReadDeployMetadata(dir, defaultBranch, projectName, DebugLog);
 
-                    deployTriggers = ExtractDeployTriggers(batContent);
-                    if (!string.IsNullOrEmpty(deployTriggers))
-                        DebugLog?.Invoke($"[DEBUG] [{projectName}] DEPLOY_TRIGGERS={deployTriggers}");
-                }
+                if (!string.IsNullOrEmpty(containerPrefix))
+                    DebugLog?.Invoke($"[DEBUG] [{projectName}] PROJECT_NAME={containerPrefix}");
+                if (!string.IsNullOrEmpty(deployTriggers))
+                    DebugLog?.Invoke($"[DEBUG] [{projectName}] DEPLOY_TRIGGERS={deployTriggers}");
+                if (!string.IsNullOrEmpty(exitedOkContainers))
+                    DebugLog?.Invoke($"[DEBUG] [{projectName}] EXITED_OK_CONTAINERS={exitedOkContainers}");
 
                 // 현재 커밋 해시 읽기
                 var commitHash = ReadCommitHash(dir, defaultBranch);
@@ -92,6 +89,7 @@ namespace DeployMonitor.Services
                     LastCommitHash = commitHash,
                     ContainerPrefix = containerPrefix,
                     DeployTriggers = deployTriggers,
+                    ExitedOkContainers = exitedOkContainers,
                     Status = ProjectStatus.Idle,
                     LastMessage = ""
                 });
@@ -158,6 +156,21 @@ namespace DeployMonitor.Services
             return TryFindDeployBatPath(bareRepoPath, branch, projectName, out foundPath, debugLog);
         }
 
+        /// <summary>
+        /// deploy.bat에서 배포 관련 메타데이터를 읽는다.
+        /// </summary>
+        public static (string containerPrefix, string deployTriggers, string exitedOkContainers)
+            ReadDeployMetadata(string bareRepoPath, string branch, string projectName, Action<string>? debugLog = null)
+        {
+            if (!TryReadDeployBatFromRepo(bareRepoPath, branch, projectName, out var batContent, out _, debugLog))
+                return ("", "", "");
+
+            var containerPrefix = ExtractProjectName(batContent);
+            var deployTriggers = ExtractDeployTriggers(batContent);
+            var exitedOkContainers = ExtractExitedOkContainers(batContent);
+            return (containerPrefix, deployTriggers, exitedOkContainers);
+        }
+
         private static bool TryReadDeployBatFromRepo(
             string bareRepoPath,
             string branch,
@@ -219,6 +232,16 @@ namespace DeployMonitor.Services
         private static string ExtractDeployTriggers(string batContent)
         {
             var match = Regex.Match(batContent, @"set\s+""?DEPLOY_TRIGGERS=([^""\r\n]+)""?", RegexOptions.IgnoreCase);
+            return match.Success ? match.Groups[1].Value.Trim() : "";
+        }
+
+        /// <summary>
+        /// deploy.bat 내용에서 EXITED_OK_CONTAINERS 값을 추출한다.
+        /// 패턴: set "EXITED_OK_CONTAINERS=db-backup backup-job"
+        /// </summary>
+        private static string ExtractExitedOkContainers(string batContent)
+        {
+            var match = Regex.Match(batContent, @"set\s+""?EXITED_OK_CONTAINERS=([^""\r\n]+)""?", RegexOptions.IgnoreCase);
             return match.Success ? match.Groups[1].Value.Trim() : "";
         }
 
