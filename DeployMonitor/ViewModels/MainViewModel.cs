@@ -48,6 +48,7 @@ namespace DeployMonitor.ViewModels
         // 컬렉션 동기화용 락 객체
         private readonly object _watchLogsLock = new();
         private readonly object _deployLogsLock = new();
+        private readonly object _projectsLock = new();
 
         public MainViewModel()
         {
@@ -62,6 +63,7 @@ namespace DeployMonitor.ViewModels
             // 컬렉션 스레드 동기화 활성화
             BindingOperations.EnableCollectionSynchronization(WatchLogs, _watchLogsLock);
             BindingOperations.EnableCollectionSynchronization(DeployLogs, _deployLogsLock);
+            BindingOperations.EnableCollectionSynchronization(Projects, _projectsLock);
 
             // 이벤트 연결
             _scanner.DebugLog += AddWatchLog;
@@ -184,7 +186,7 @@ namespace DeployMonitor.ViewModels
 
             try
             {
-                Projects.Clear();
+                lock (_projectsLock) Projects.Clear();
                 AddWatchLog("프로젝트 스캔 중...");
 
                 // 백그라운드에서 스캔 실행 (UI 블로킹 방지)
@@ -194,8 +196,11 @@ namespace DeployMonitor.ViewModels
                 var list = await System.Threading.Tasks.Task.Run(() =>
                     _scanner.Scan(repoFolder, deployFolder, branch));
 
-                foreach (var p in list)
-                    Projects.Add(p);
+                lock (_projectsLock)
+                {
+                    foreach (var p in list)
+                        Projects.Add(p);
+                }
 
                 AddWatchLog($"deploy.bat 있는 프로젝트 {list.Count}개 발견");
                 await SyncProjectRuntimeStatusesAsync(list);
@@ -228,7 +233,7 @@ namespace DeployMonitor.ViewModels
             try
             {
                 // 감시 시작 전 프로젝트 목록 새로고침 (비동기)
-                Projects.Clear();
+                lock (_projectsLock) Projects.Clear();
                 AddWatchLog("프로젝트 스캔 중...");
 
                 var repoFolder = RepoFolder;
@@ -237,8 +242,11 @@ namespace DeployMonitor.ViewModels
                 var list = await System.Threading.Tasks.Task.Run(() =>
                     _scanner.Scan(repoFolder, deployFolder, branch));
 
-                foreach (var p in list)
-                    Projects.Add(p);
+                lock (_projectsLock)
+                {
+                    foreach (var p in list)
+                        Projects.Add(p);
+                }
 
                 AddWatchLog($"deploy.bat 있는 프로젝트 {list.Count}개 발견");
                 await SyncProjectRuntimeStatusesAsync(list);
@@ -253,12 +261,17 @@ namespace DeployMonitor.ViewModels
 
         private void StartWatchInternal()
         {
-            if (Projects.Count == 0)
+            List<ProjectInfo> projectList;
+            lock (_projectsLock)
+            {
+                projectList = new List<ProjectInfo>(Projects);
+            }
+
+            if (projectList.Count == 0)
                 AddWatchLog("deploy.bat 있는 프로젝트가 없습니다. 저장소에 deploy.bat을 추가하세요.");
             else
-                AddWatchLog($"감시 대상: {Projects.Count}개");
+                AddWatchLog($"감시 대상: {projectList.Count}개");
 
-            var projectList = new System.Collections.Generic.List<ProjectInfo>(Projects);
             _watcher.Start(projectList, IntervalSeconds, RepoFolder, DeployFolder, DefaultBranch);
             IsWatching = true;
         }
@@ -395,15 +408,21 @@ namespace DeployMonitor.ViewModels
         /// <summary>새 프로젝트 발견 이벤트</summary>
         private void OnNewProjectFound(ProjectInfo project)
         {
-            Application.Current?.Dispatcher.BeginInvoke(() =>
+            bool added = false;
+            lock (_projectsLock)
             {
                 if (Projects.All(p => p.Name != project.Name))
                 {
                     Projects.Add(project);
-                    AddWatchLog($"[{project.Name}] 새 프로젝트 추가됨");
-                    _ = _runner.RefreshProjectStatusFromDockerAsync(project);
+                    added = true;
                 }
-            });
+            }
+
+            if (added)
+            {
+                AddWatchLog($"[{project.Name}] 새 프로젝트 추가됨");
+                _ = _runner.RefreshProjectStatusFromDockerAsync(project);
+            }
         }
 
         /// <summary>시스템 사용량 갱신</summary>
@@ -534,26 +553,24 @@ namespace DeployMonitor.ViewModels
         /// <summary>프로젝트 스냅샷 (API용)</summary>
         public List<object> GetProjectsSnapshot()
         {
-            var result = new List<object>();
-            Application.Current?.Dispatcher.Invoke(() =>
+            List<ProjectInfo> snapshot;
+            lock (_projectsLock)
             {
-                foreach (var p in Projects)
-                {
-                    result.Add(new
-                    {
-                        name = p.Name,
-                        status = (int)p.Status,
-                        statusDisplay = p.StatusDisplay,
-                        hasDeployBat = p.HasDeployBat,
-                        branch = p.Branch,
-                        lastCommitHash = p.LastCommitHash,
-                        lastCommitDetectedTime = p.LastCommitDetectedTime,
-                        lastDeployTime = p.LastDeployTime,
-                        lastMessage = p.LastMessage
-                    });
-                }
-            });
-            return result;
+                snapshot = new List<ProjectInfo>(Projects);
+            }
+
+            return snapshot.Select(p => (object)new
+            {
+                name = p.Name,
+                status = (int)p.Status,
+                statusDisplay = p.StatusDisplay,
+                hasDeployBat = p.HasDeployBat,
+                branch = p.Branch,
+                lastCommitHash = p.LastCommitHash,
+                lastCommitDetectedTime = p.LastCommitDetectedTime,
+                lastDeployTime = p.LastDeployTime,
+                lastMessage = p.LastMessage
+            }).ToList();
         }
 
         /// <summary>시스템 메트릭 (API용)</summary>
@@ -583,25 +600,23 @@ namespace DeployMonitor.ViewModels
         /// <summary>프로젝트 조회 (API용)</summary>
         public ProjectInfo? GetProject(string projectName)
         {
-            ProjectInfo? project = null;
-            Application.Current?.Dispatcher.Invoke(() =>
+            lock (_projectsLock)
             {
-                project = Projects.FirstOrDefault(p =>
+                return Projects.FirstOrDefault(p =>
                     string.Equals(p.Name, projectName, StringComparison.OrdinalIgnoreCase));
-            });
-            return project;
+            }
         }
 
         /// <summary>프로젝트별 배포 로그 (API용)</summary>
         public string? GetProjectLog(string projectName)
         {
-            string? log = null;
-            Application.Current?.Dispatcher.Invoke(() =>
+            ProjectInfo? project;
+            lock (_projectsLock)
             {
-                var project = Projects.FirstOrDefault(p => p.Name == projectName);
-                log = project?.LastDeploymentLog;
-            });
-            return log;
+                project = Projects.FirstOrDefault(p =>
+                    string.Equals(p.Name, projectName, StringComparison.OrdinalIgnoreCase));
+            }
+            return project?.LastDeploymentLog;
         }
 
         /// <summary>감시 시작 (API용)</summary>
@@ -631,22 +646,19 @@ namespace DeployMonitor.ViewModels
         /// <summary>수동 배포 (API용)</summary>
         public Task<bool> ApiManualDeploy(string projectName)
         {
-            var tcs = new TaskCompletionSource<bool>();
-            Application.Current?.Dispatcher.BeginInvoke(() =>
+            ProjectInfo? project;
+            lock (_projectsLock)
             {
-                var project = Projects.FirstOrDefault(p => p.Name == projectName);
-                if (project != null && project.HasDeployBat)
-                {
-                    AddDeployLog($"[{project.Name}] 수동 배포 시작 (웹)");
-                    _runner.Enqueue(project, "manual");
-                    tcs.TrySetResult(true);
-                }
-                else
-                {
-                    tcs.TrySetResult(false);
-                }
-            });
-            return tcs.Task;
+                project = Projects.FirstOrDefault(p =>
+                    string.Equals(p.Name, projectName, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (project == null || !project.HasDeployBat)
+                return Task.FromResult(false);
+
+            AddDeployLog($"[{project.Name}] 수동 배포 시작 (웹)");
+            _runner.Enqueue(project, "manual");
+            return Task.FromResult(true);
         }
 
         /// <summary>프로젝트 새로고침 (API용)</summary>
