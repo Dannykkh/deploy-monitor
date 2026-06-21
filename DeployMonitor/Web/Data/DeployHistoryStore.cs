@@ -8,6 +8,9 @@ namespace DeployMonitor.Web.Data
     {
         private readonly string _connectionString;
 
+        /// <summary>프로젝트당 보존할 최대 이력 행 수 (장기 실행 시 무한 증가 방지)</summary>
+        private const int MaxRowsPerProject = 500;
+
         public DeployHistoryStore(string dbPath)
         {
             _connectionString = $"Data Source={dbPath}";
@@ -34,6 +37,26 @@ namespace DeployMonitor.Web.Data
             cmd.Parameters.AddWithValue("@ds", durationSec.HasValue ? durationSec.Value : DBNull.Value);
             cmd.Parameters.AddWithValue("@ls", (object?)logSummary ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@tt", triggerType);
+            cmd.ExecuteNonQuery();
+
+            PruneOldEntries(conn, projectName);
+        }
+
+        /// <summary>프로젝트당 최근 N개만 남기고 오래된 이력을 삭제한다.</summary>
+        private static void PruneOldEntries(SqliteConnection conn, string projectName, int keep = MaxRowsPerProject)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                DELETE FROM deploy_history
+                WHERE project_name = @pn
+                  AND id NOT IN (
+                      SELECT id FROM deploy_history
+                      WHERE project_name = @pn
+                      ORDER BY id DESC
+                      LIMIT @keep
+                  )";
+            cmd.Parameters.AddWithValue("@pn", projectName);
+            cmd.Parameters.AddWithValue("@keep", keep);
             cmd.ExecuteNonQuery();
         }
 

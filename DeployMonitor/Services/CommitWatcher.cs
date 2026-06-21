@@ -21,6 +21,14 @@ namespace DeployMonitor.Services
         // 스레드 안전한 해시 추적 (UI 바인딩 프로퍼티 대신 사용)
         private readonly ConcurrentDictionary<string, string> _knownHashes = new();
 
+        // 폴링 재진입 방지 (Timer는 이전 콜백 완료를 기다리지 않고 새 스레드풀 스레드에서 또 실행함)
+        private int _pollRunning;
+
+        // deploy.bat 없는 repo의 마지막 확인 커밋 해시 캐시.
+        // 같은 커밋에서 git ls-tree 재실행을 막아 폴링 부하를 낮춘다.
+        // 커밋이 바뀌면(해시 변경) 자동으로 재확인되므로 나중에 deploy.bat을 추가해도 감지된다.
+        private readonly ConcurrentDictionary<string, string> _noDeployBatHashes = new();
+
         // 새 프로젝트 스캔용
         private string _repoFolder = "";
         private string _deployFolder = "";
@@ -46,6 +54,8 @@ namespace DeployMonitor.Services
             _deployFolder = deployFolder;
             _defaultBranch = defaultBranch;
             _knownHashes.Clear();
+            _noDeployBatHashes.Clear();
+            Interlocked.Exchange(ref _pollRunning, 0);
 
             // 현재 해시를 기록 (백그라운드에서 실행)
             Task.Run(() =>
@@ -109,12 +119,15 @@ namespace DeployMonitor.Services
                 {
                     NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime,
                     IncludeSubdirectories = true,
+                    // git gc/repack 등 버스트 시 내부 버퍼 오버플로(이벤트 유실)를 줄인다.
+                    InternalBufferSize = 64 * 1024,
                     EnableRaisingEvents = true
                 };
 
                 var proj = project;
                 watcher.Changed += (_, e) => OnFileChanged(proj, e.FullPath);
                 watcher.Created += (_, e) => OnFileChanged(proj, e.FullPath);
+                watcher.Error += OnWatcherError;
 
                 _watchers.Add(watcher);
             }
@@ -134,7 +147,8 @@ namespace DeployMonitor.Services
                 };
 
                 var proj = project;
-                packedWatcher.Changed += (_, _) => CheckProject(proj);
+                packedWatcher.Changed += (_, e) => OnFileChanged(proj, e.FullPath);
+                packedWatcher.Error += OnWatcherError;
 
                 _watchers.Add(packedWatcher);
             }
@@ -157,10 +171,25 @@ namespace DeployMonitor.Services
 
             if (isBranchRefChanged || normalizedPath.EndsWith("/packed-refs", StringComparison.OrdinalIgnoreCase))
             {
-                // 파일 쓰기 완료 대기 (짧은 지연)
-                Thread.Sleep(200);
-                CheckProject(project);
+                // FSW 디스패치 스레드를 막지 않도록 지연 처리를 스레드풀로 넘긴다.
+                // (콜백 스레드에서 Thread.Sleep을 하면 후속 이벤트 처리가 막혀 버퍼 오버플로/이벤트 유실 위험)
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(200); // 파일 쓰기 완료 대기 (짧은 지연)
+                        if (_isRunning) CheckProject(project);
+                    }
+                    catch { /* 감시 중지 등으로 인한 예외 무시 */ }
+                });
             }
+        }
+
+        /// <summary>FileSystemWatcher 오류 처리 (내부 버퍼 오버플로 등)</summary>
+        private void OnWatcherError(object sender, ErrorEventArgs e)
+        {
+            // 버퍼 오버플로로 이벤트가 유실돼도 백업 폴링이 보완하므로 로그만 남긴다.
+            LogMessage?.Invoke($"FileSystemWatcher 오류(폴링으로 보완): {e.GetException().Message}");
         }
 
         /// <summary>모든 프로젝트 폴링 확인</summary>
@@ -168,17 +197,34 @@ namespace DeployMonitor.Services
         {
             if (!_isRunning) return;
 
-            // 기존 프로젝트 커밋 확인
-            foreach (var project in _projects)
+            // 재진입 방지: 이전 폴링이 아직 끝나지 않았으면 이번 주기는 건너뛴다.
+            // (Timer는 콜백 완료를 기다리지 않으므로 가드가 없으면 _projects 동시 순회/수정으로
+            //  처리되지 않는 예외가 스레드풀 스레드에서 발생해 프로세스가 강제 종료될 수 있다.)
+            if (Interlocked.CompareExchange(ref _pollRunning, 1, 0) != 0) return;
+
+            try
             {
-                if (!project.HasDeployBat) continue;
-                if (project.Status == ProjectStatus.Deploying) continue;
+                // 순회 중 ScanForNewProjects가 _projects를 수정해도 안전하도록 스냅샷 사용
+                var snapshot = _projects.ToArray();
+                foreach (var project in snapshot)
+                {
+                    if (!project.HasDeployBat) continue;
+                    if (project.Status == ProjectStatus.Deploying) continue;
 
-                CheckProject(project);
+                    CheckProject(project);
+                }
+
+                // 새 프로젝트 스캔
+                ScanForNewProjects();
             }
-
-            // 새 프로젝트 스캔
-            ScanForNewProjects();
+            catch (Exception ex)
+            {
+                LogMessage?.Invoke($"폴링 오류: {ex.Message}");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _pollRunning, 0);
+            }
         }
 
         /// <summary>새 프로젝트 스캔</summary>
@@ -205,12 +251,24 @@ namespace DeployMonitor.Services
                     // 이미 감시 중인지 확인
                     if (_projects.Exists(p => p.Name == projectName)) continue;
 
-                    // deploy.bat 존재 확인
-                    if (!RepoScanner.HasDeployBatInRepo(dir, _defaultBranch, projectName, out _)) continue;
+                    // deploy.bat 없는 repo는 같은 커밋에서 git ls-tree 재실행을 생략한다.
+                    // (커밋 해시는 파일 읽기라 저렴하고, 해시가 바뀌면 캐시가 무효화되어 재확인된다)
+                    var currentHash = RepoScanner.ReadCommitHash(dir, _defaultBranch);
+                    if (_noDeployBatHashes.TryGetValue(dir, out var checkedHash) && checkedHash == currentHash)
+                        continue;
+
+                    // deploy.bat 존재 확인 (여기서만 git ls-tree 프로세스 실행)
+                    if (!RepoScanner.HasDeployBatInRepo(dir, _defaultBranch, projectName, out _))
+                    {
+                        _noDeployBatHashes[dir] = currentHash; // 이 커밋엔 deploy.bat 없음으로 기록
+                        continue;
+                    }
+
+                    _noDeployBatHashes.TryRemove(dir, out _); // 발견됐으니 캐시 해제
 
                     // 새 프로젝트 발견
                     var deployPath = Path.Combine(_deployFolder, projectName);
-                    var commitHash = RepoScanner.ReadCommitHash(dir, _defaultBranch);
+                    var commitHash = currentHash;
                     var (containerPrefix, deployTriggers, exitedOkContainers) =
                         RepoScanner.ReadDeployMetadata(dir, _defaultBranch, projectName);
 

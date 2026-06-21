@@ -207,6 +207,10 @@ namespace DeployMonitor.Services
                     return;
                 }
 
+                // 비동기 출력(BeginOutputReadLine/BeginErrorReadLine) flush 완료까지 대기.
+                // WaitForExit(timeout) 오버로드는 리다이렉트 스트림 완료를 보장하지 않아 로그 꼬리가 잘릴 수 있다.
+                try { await process.WaitForExitAsync(); } catch { }
+
                 var exitCode = process.ExitCode;
                 var now = DateTime.Now.ToString("HH:mm:ss");
 
@@ -452,6 +456,9 @@ namespace DeployMonitor.Services
                     });
                     return false;
                 }
+
+                // 비동기 출력 flush 완료까지 대기 (로그 꼬리 유실 방지)
+                try { await process.WaitForExitAsync(); } catch { }
 
                 if (process.ExitCode != 0)
                 {
